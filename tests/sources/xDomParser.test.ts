@@ -1,0 +1,52 @@
+import { JSDOM } from 'jsdom';
+import { describe, expect, it } from 'vitest';
+
+import { extractXPosts } from '../../src/main/sources/xDomParser';
+
+describe('X DOM parser', () => {
+  it('extracts account posts and ignores pure reposts and foreign tweets', () => {
+    const dom = new JSDOM(`<main>
+      <article data-testid="tweet">
+        <div data-testid="User-Name">Tibo @thsottiaux</div>
+        <div data-testid="tweetText">Codex resets will continue tomorrow.</div>
+        <a href="/thsottiaux/status/200"><time datetime="2026-07-31T04:55:00.000Z"></time></a>
+      </article>
+      <article data-testid="tweet">
+        <div data-testid="socialContext">Tibo reposted</div>
+        <div data-testid="User-Name">Other @other</div>
+        <div data-testid="tweetText">Not ours</div>
+        <a href="/other/status/199"><time datetime="2026-07-31T04:54:00.000Z"></time></a>
+      </article>
+      <article data-testid="tweet">
+        <div data-testid="User-Name">Other @other</div>
+        <div data-testid="tweetText">Foreign post</div>
+        <a href="/other/status/198"><time datetime="2026-07-31T04:53:00.000Z"></time></a>
+      </article>
+    </main>`);
+
+    expect(extractXPosts(dom.window.document, 'thsottiaux')).toEqual([
+      expect.objectContaining({
+        id: '200',
+        text: 'Codex resets will continue tomorrow.',
+        kind: 'original',
+        sourceIds: ['x-browser'],
+      }),
+    ]);
+  });
+
+  it('recognizes replies and quote context', () => {
+    const dom = new JSDOM(`<article data-testid="tweet">
+      <div data-testid="User-Name">Tibo @thsottiaux</div>
+      <div data-testid="reply">Replying to @openai</div>
+      <div data-testid="tweetText">Yes, about to reset Codex.</div>
+      <div data-testid="quoteTweet"><div data-testid="tweetText">Usage limits are tight</div></div>
+      <a href="/thsottiaux/status/201"><time datetime="2026-07-31T04:56:00.000Z"></time></a>
+    </article>`);
+
+    expect(extractXPosts(dom.window.document, 'thsottiaux')[0]).toMatchObject({
+      id: '201',
+      kind: 'reply',
+      quotedText: 'Usage limits are tight',
+    });
+  });
+});
