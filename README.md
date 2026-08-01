@@ -19,7 +19,7 @@ Tibo Watch 是一个面向 Windows 10/11 x64 的本地桌面监测器。它每 5
 从 `release` 目录运行：
 
 ```text
-Tibo-Watch-Setup-0.1.0.exe
+Tibo-Watch-Setup-0.1.1.exe
 ```
 
 安装包为 per-user NSIS，无需管理员权限。首版未做代码签名，Windows SmartScreen 可能显示警告。卸载默认保留本地历史与配置。

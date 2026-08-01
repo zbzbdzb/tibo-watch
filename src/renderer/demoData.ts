@@ -75,7 +75,7 @@ export const demoSnapshot: AppSnapshot = {
   xLoggedIn: true,
   lastCheckedAt: '2025-05-08T06:35:00.000Z',
   nextCheckAt: '2025-05-08T06:40:00.000Z',
-  version: '1.0.0',
+  version: '0.1.1',
 };
 
 export const emptySnapshot: AppSnapshot = {
@@ -105,5 +105,5 @@ export const emptySnapshot: AppSnapshot = {
   xLoggedIn: false,
   lastCheckedAt: null,
   nextCheckAt: null,
-  version: '0.1.0',
+  version: '0.1.1',
 };

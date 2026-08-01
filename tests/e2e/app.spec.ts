@@ -32,6 +32,22 @@ test.describe.serial('Tibo Watch Electron app', () => {
     await expect(page.getByText('共 2 条记录')).toBeVisible();
   });
 
+  test('restores the sidebar and persists the selected theme', async () => {
+    const app = page.locator('.app');
+
+    await page.getByRole('button', { name: '收起导航' }).click();
+    await expect(app).toHaveClass(/sidebar-collapsed/);
+    await page.getByRole('button', { name: '展开导航' }).click();
+    await expect(app).not.toHaveClass(/sidebar-collapsed/);
+
+    await page.getByRole('button', { name: '切换到浅色模式' }).click();
+    await expect(app).toHaveAttribute('data-theme', 'light');
+    await page.reload();
+    await expect(page.locator('.app')).toHaveAttribute('data-theme', 'light');
+    await page.getByRole('button', { name: '切换到深色模式' }).click();
+    await expect(page.locator('.app')).toHaveAttribute('data-theme', 'dark');
+  });
+
   test('filters the feed and opens the selected detail', async () => {
     await page.getByRole('button', { name: '预告', exact: true }).click();
     await expect(page.getByText('Codex resets will continue tomorrow.')).toBeVisible();

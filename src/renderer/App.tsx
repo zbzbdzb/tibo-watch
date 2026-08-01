@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import {
   Bell, Check, CheckCircle2, ChevronRight, CircleGauge, Clock3, Database,
-  ExternalLink, Home, Info, LogOut, Mail, Menu, Minimize2, PanelLeftClose,
-  RefreshCw, Save, Send, Settings, ShieldAlert, Square, Sun, X, Zap,
+  ExternalLink, Home, Info, LogOut, Mail, Menu, Minimize2, Moon, PanelLeftClose,
+  PanelLeftOpen, RefreshCw, Save, Send, Settings, ShieldAlert, Square, Sun, X, Zap,
 } from 'lucide-react';
 
 import type { AppSnapshot, PostView, RendererSettings, SettingsUpdate } from '../shared/api';
@@ -10,6 +10,14 @@ import type { SignalLevel } from '../shared/domain';
 import { demoSnapshot, emptySnapshot } from './demoData';
 
 type Page = 'overview' | 'activity' | 'sources' | 'notifications' | 'settings';
+type Theme = 'dark' | 'light';
+
+const THEME_STORAGE_KEY = 'tibo-watch-theme';
+
+function getInitialTheme(): Theme {
+  const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+  return savedTheme === 'light' || savedTheme === 'dark' ? savedTheme : 'dark';
+}
 
 const api = window.tiboWatch;
 
@@ -24,8 +32,14 @@ const navigation: Array<{ id: Page; label: string; icon: typeof Home }> = [
 export function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(api ? emptySnapshot : demoSnapshot);
   const [page, setPage] = useState<Page>('overview');
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 1180);
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [focusedPostId, setFocusedPostId] = useState<string | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+    document.documentElement.style.colorScheme = theme;
+  }, [theme]);
 
   useEffect(() => {
     if (!api) return;
@@ -42,7 +56,7 @@ export function App() {
   const currentTitle = navigation.find((item) => item.id === page)?.label ?? '总览';
 
   return (
-    <div className={`app ${collapsed ? 'sidebar-collapsed' : ''}`}>
+    <div className={`app ${collapsed ? 'sidebar-collapsed' : ''}`} data-theme={theme}>
       <header className="titlebar">
         <button className="icon-button menu-button" onClick={() => setCollapsed((value) => !value)} aria-label="切换导航"><Menu /></button>
         <strong>Tibo Watch</strong><span>Codex 重置监测</span>
@@ -56,7 +70,14 @@ export function App() {
         <nav>
           {navigation.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)} title={item.label}><item.icon /><span>{item.label}</span></button>)}
         </nav>
-        <div className="sidebar-bottom"><button><Sun /><span>深色模式</span></button><button onClick={() => setCollapsed(true)}><PanelLeftClose /><span>收起</span></button></div>
+        <div className="sidebar-bottom">
+          <button onClick={() => setTheme((value) => value === 'dark' ? 'light' : 'dark')} aria-label={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'} title={theme === 'dark' ? '浅色模式' : '深色模式'}>
+            {theme === 'dark' ? <Sun /> : <Moon />}<span>{theme === 'dark' ? '浅色模式' : '深色模式'}</span>
+          </button>
+          <button onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? '展开导航' : '收起导航'} title={collapsed ? '展开' : '收起'}>
+            {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}<span>{collapsed ? '展开' : '收起'}</span>
+          </button>
+        </div>
       </aside>
       <main className="content" aria-label={currentTitle}>
         {page === 'overview' && <Overview key={focusedPostId ?? 'overview'} snapshot={snapshot} onCheck={runCheck} initialPostId={focusedPostId} />}
