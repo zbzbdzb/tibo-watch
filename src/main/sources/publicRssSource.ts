@@ -21,21 +21,36 @@ export interface PublicRssSourceOptions {
   maxInstancesPerCheck?: number;
 }
 
-function textContent(value: RssItem['guid']): string {
-  if (typeof value === 'string') return value;
-  return value?.['#text'] ?? '';
-}
-
 function stripMarkup(value: string): string {
   return value
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
     .replace(/<br\s*\/?\s*>/gi, '\n')
+    .replace(/<\/(?:p|div)>/gi, '\n')
     .replace(/<[^>]+>/g, '')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Math.min(Number(code), 0x10ffff)))
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function descriptionParts(html: string): { primary: string; quotedText: string | null } {
+  // Nitter puts quoted context in a quote block. Only split when an explicit
+  // boundary exists; a flat description containing a status card is ambiguous.
+  let quotedText: string | null = null;
+  const withoutQuote = html.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, quote: string) => {
+    quotedText = stripMarkup(quote) || null;
+    return '';
+  });
+  const quoteBoundary = withoutQuote.search(/<(?:div|p)\b[^>]*(?:class|data-testid)=["'][^"']*(?:quote|quoted-tweet)/i);
+  const primaryHtml = quoteBoundary >= 0 ? withoutQuote.slice(0, quoteBoundary) : withoutQuote;
+  const cleaned = primaryHtml
+    .replace(/<p\b[^>]*>\s*<a\b[^>]*>\s*(?:Read more|Show more|View (?:post|tweet)|(?:Image|Video|Photo)(?: \d+)?)\s*<\/a>\s*<\/p>/gi, '')
+    .replace(/<a\b[^>]*>\s*(?:Read more|Show more|View (?:post|tweet))\s*<\/a>/gi, '');
+  return { primary: stripMarkup(cleaned), quotedText };
 }
 
 export function parseInstanceRegistry(markdown: string): string[] {
@@ -65,26 +80,38 @@ export function parseNitterRss(xml: string, sourceId: string): MonitoredPost[] {
     if (/^(?:RT by @|RT @)/i.test(rawTitle)) return [];
 
     const link = String(item.link ?? '');
-    const statusMatch = link.match(/\/([^/]+)\/status\/(\d+)/);
+    const statusMatch = link.match(/^https?:\/\/[^/]+\/([^/]+)\/status\/(\d+)(?:[/?#]|$)/i);
     if (!statusMatch) return [];
 
-    const authorHandle = statusMatch[1]!;
+    const authorHandle = statusMatch[1]!.toLowerCase();
+    if (authorHandle !== 'thsottiaux') return [];
     const statusId = statusMatch[2]!;
-    const id = textContent(item.guid) || statusId;
     const isReply = /^R to @/i.test(rawTitle);
     const replyTitle = rawTitle.replace(/^R to @[^:]+:\s*/i, '');
-    const description = stripMarkup(String(item.description ?? ''));
-    const text = isReply ? replyTitle || description : rawTitle || description;
+    const descriptionHtml = String(item.description ?? '');
+    const { primary: description, quotedText } = descriptionParts(descriptionHtml);
+    const title = isReply ? replyTitle : rawTitle;
+    const titlePrefix = title.replace(/(?:\.{3}|…)(?:\s*(?:Read more|Show more))?\s*$/i, '').trim();
+    // A longer description is used only when it expands the same primary text.
+    // Unknown flat quote/card formats fall back to the title, never concatenation.
+    const withoutBoilerplate = descriptionHtml.replace(/<a\b[^>]*>\s*(?:Read more|Show more|View (?:post|tweet))\s*<\/a>/gi, '');
+    const hasUnsplitCard = /href=["'][^"']*\/status\/\d+/i.test(withoutBoilerplate) &&
+      !/<blockquote\b|(?:class|data-testid)=["'][^"']*quote/i.test(descriptionHtml);
+    const text = !hasUnsplitCard && description && (!title ||
+      (description.length >= title.length && description.startsWith(titlePrefix)))
+      ? description : title || description;
+    const date = new Date(String(item.pubDate ?? ''));
+    if (!text || !Number.isFinite(date.getTime())) return [];
 
     return [
       {
-        id,
+        id: statusId,
         authorHandle,
         text,
-        createdAt: new Date(String(item.pubDate ?? '')).toISOString(),
+        createdAt: date.toISOString(),
         url: `https://x.com/${authorHandle}/status/${statusId}`,
-        kind: isReply ? 'reply' : 'original',
-        quotedText: null,
+        kind: isReply ? 'reply' : quotedText ? 'quote' : 'original',
+        quotedText,
         sourceIds: [sourceId],
       },
     ];

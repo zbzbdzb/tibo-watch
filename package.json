@@ -1,6 +1,6 @@
 {
   "name": "tibo-watch",
-  "version": "0.1.1",
+  "version": "0.2.14",
   "private": true,
   "description": "Windows desktop monitor for Tibo's Codex reset announcements",
   "main": "dist/main/main.js",
@@ -76,6 +76,16 @@
       "output": "release",
       "buildResources": "build"
     },
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "tray-icon.png"
+      },
+      {
+        "from": "chrome-extension",
+        "to": "chrome-extension"
+      }
+    ],
     "win": {
       "icon": "build/icon.ico",
       "target": [

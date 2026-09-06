@@ -34,17 +34,46 @@ describe('Nitter RSS source', () => {
   it('parses originals and replies, normalizes canonical links, and ignores reposts', () => {
     expect(parseNitterRss(RSS, 'public-rss')).toEqual([
       expect.objectContaining({
-        id: 'tweet-101',
+        id: '101',
         kind: 'original',
         text: "I've now reset Codex usage limits for paid subscriptions.",
         url: 'https://x.com/thsottiaux/status/101',
       }),
       expect.objectContaining({
-        id: 'tweet-100',
+        id: '100',
         kind: 'reply',
         text: 'Should we reset Codex again soon?',
       }),
     ]);
+  });
+
+  it('uses the full primary description when the title truncates before a reset announcement', () => {
+    const xml = `<rss><channel><item>
+      <title>Update on rate limits in Codex. We found...</title>
+      <description><![CDATA[<p>Update on rate limits in Codex. We found a bug.</p><p>Tomorrow we will do a full reset of usage for all paid subscriptions.</p><p><a href="https://nitter.test/thsottiaux/status/777">Read more</a></p>]]></description>
+      <guid>arbitrary-mirror-id</guid><link>https://nitter.test/thsottiaux/status/777#m</link>
+      <pubDate>Fri, 31 Jul 2026 04:53:19 GMT</pubDate>
+    </item></channel></rss>`;
+    expect(parseNitterRss(xml, 'public-rss')[0]).toMatchObject({
+      id: '777',
+      text: 'Update on rate limits in Codex. We found a bug.\nTomorrow we will do a full reset of usage for all paid subscriptions.',
+    });
+  });
+
+  it('separates explicitly marked quoted text and rejects foreign primary authors', () => {
+    const item = (handle: string) => `<item><title>Interesting update.</title>
+      <description><![CDATA[<p>Interesting update.</p><blockquote><p>Codex limits reset now.</p></blockquote>]]></description>
+      <link>https://nitter.test/${handle}/status/778</link><pubDate>Fri, 31 Jul 2026 04:53:19 GMT</pubDate></item>`;
+    const posts = parseNitterRss(`<rss><channel>${item('thsottiaux')}${item('other')}</channel></rss>`, 'public-rss');
+    expect(posts).toEqual([expect.objectContaining({
+      id: '778', text: 'Interesting update.', quotedText: 'Codex limits reset now.', kind: 'quote',
+    })]);
+  });
+
+  it('does not append ambiguous flat quote context or fail the feed on malformed dates', () => {
+    const item = `<item><title>Interesting update.</title><description><![CDATA[<p>Interesting update.</p><a href="https://x.com/other/status/779">Other</a><p>We will reset Codex now.</p>]]></description><link>https://nitter.test/thsottiaux/status/780</link><pubDate>Fri, 31 Jul 2026 04:53:19 GMT</pubDate></item>`;
+    expect(parseNitterRss(`<rss><channel>${item}${item.replace('Fri, 31 Jul 2026 04:53:19 GMT', 'invalid')}</channel></rss>`, 'public-rss'))
+      .toEqual([expect.objectContaining({ id: '780', text: 'Interesting update.', quotedText: null })]);
   });
 
   it('extracts healthy HTTPS instances from the maintained markdown registry', () => {

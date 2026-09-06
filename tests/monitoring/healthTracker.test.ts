@@ -3,6 +3,15 @@ import { describe, expect, it } from 'vitest';
 import { SourceHealthTracker } from '../../src/main/monitoring/sourceHealthTracker';
 
 describe('SourceHealthTracker', () => {
+  it('preserves actionable login diagnostics through repeated failures', () => {
+    const tracker = new SourceHealthTracker(['x-browser']);
+    for (let index = 0; index < 4; index += 1) tracker.recordState('x-browser', 'needs_login', '2026-09-05T00:00:00Z', 'X_SESSION_EXPIRED');
+    expect(tracker.get('x-browser')).toMatchObject({ state: 'needs_login', errorCode: 'X_SESSION_EXPIRED' });
+    expect(tracker.consumeOutageIncident()).toBe(true);
+    expect(tracker.consumeOutageIncident()).toBe(false);
+    tracker.recordState('x-browser', 'disabled', '2026-09-05T00:00:00Z');
+    expect(tracker.get('x-browser').errorCode).toBeNull();
+  });
   it('marks a source stale after three consecutive failed cycles', () => {
     const tracker = new SourceHealthTracker(['public-rss', 'x-browser']);
     tracker.record('public-rss', false, '2026-07-31T05:00:00.000Z');

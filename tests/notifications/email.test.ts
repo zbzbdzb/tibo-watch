@@ -49,7 +49,9 @@ describe('email notification', () => {
     expect(message.text).toContain("I've now reset Codex usage limits.");
     expect(message.text).toContain('2026年7月31日 12:53:19');
     expect(message.text).toContain('明确表示额度已经重置');
-    expect(message.text).toContain('公共 RSS、X 登录会话');
+    expect(message.text).toContain('判定证据：Codex、reset');
+    expect(message.text).not.toContain('命中词：');
+    expect(message.text).toContain('公共 RSS、Chrome 登录共享');
     expect(message.text).toContain(post.url);
   });
 

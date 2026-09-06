@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Tibo Watch isolated transport fixture",
+  "version": "0.0.1",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApxESGbT2vff9xRrYxmfO127vgb/ax4fs9FMegi956VRxrjnB6kcH7WmqJpdkLaqxmW3tpkhm5gQpo+ZrvdBfHjYTHyfnrmsu0Uxfx5X9w/4LdsC9f5T1QVb5Ch1yAnCqxex0HVbsvGMvBcswS9cGy55OabXt25ZRTKTSrcXXBh8u+Gizg1PPqooGSm8+mqULnuj3wIAt5R1Q2waEwZMjcaL9VpKqONl+DLcqzhoGDauTVbXySM4TLmCo8JWSfkzfGdXB0bjM5TLCUV/VwxUK54DEixX1pUKKNGBnldrqTO52RcWjnIXwFNUAiSRna4xUIhA7nm/tcyWJA6uKfRCalQIDAQAB",
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "worker.js" }
+}

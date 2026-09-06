@@ -60,9 +60,26 @@ export interface SignalEvent {
 
 export interface DeliveryReceipt {
   channel: 'windows' | 'email';
-  state: 'sent' | 'failed' | 'queued';
+  state: 'sent' | 'failed' | 'queued' | 'partial';
   deliveredAt: string | null;
   errorCode: string | null;
+  acceptedRecipients?: string[];
+  rejectedRecipients?: string[];
+}
+
+export interface DeliveryStatusView {
+  eventId: string;
+  postId: string;
+  channel: 'windows' | 'email';
+  state: 'pending' | 'sending' | 'submitted' | 'partial' | 'failed' | 'cancelled' | 'not-sent';
+  acceptedRecipientCount: number;
+  failedRecipientCount: number;
+  pendingRecipientCount: number;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  nextAttemptAt: string | null;
+  uncertain: boolean;
 }
 
 export interface DeliveryChannel {

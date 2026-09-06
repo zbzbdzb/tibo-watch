@@ -1,7 +1,7 @@
 import { Notification } from 'electron';
 
 import type { DeliveryChannel, DeliveryReceipt, SignalEvent } from '../../shared/domain';
-import type { AppDatabase } from '../storage/database';
+import { windowsNotificationPreferences, type AppDatabase } from '../storage/database';
 
 export class WindowsChannel implements DeliveryChannel {
   readonly id = 'windows' as const;
@@ -12,10 +12,14 @@ export class WindowsChannel implements DeliveryChannel {
   ) {}
 
   async deliver(event: SignalEvent): Promise<DeliveryReceipt> {
+    const preferences = windowsNotificationPreferences(this.database.getSettings(), event.level);
+    if (!preferences.enabled) {
+      return { channel: this.id, state: 'failed', deliveredAt: null, errorCode: 'WINDOWS_NOTIFICATION_DISABLED' };
+    }
     if (!Notification.isSupported()) {
       return { channel: this.id, state: 'failed', deliveredAt: null, errorCode: 'WINDOWS_NOTIFICATION_UNAVAILABLE' };
     }
-    const post = this.database.getPost(event.postId);
+    const post = this.database.getEventSnapshot(event.id)?.post ?? this.database.getPost(event.postId);
     const title = event.level === 'confirmed'
       ? 'Codex 重置已确认'
       : event.level === 'preview'
@@ -24,7 +28,7 @@ export class WindowsChannel implements DeliveryChannel {
     const notification = new Notification({
       title,
       body: post?.text ?? '打开 Tibo Watch 查看详情。',
-      silent: event.level === 'related',
+      silent: !preferences.sound,
       urgency: event.level === 'related' ? 'normal' : 'critical',
       timeoutType: event.level === 'related' ? 'default' : 'never',
     });

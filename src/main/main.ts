@@ -1,7 +1,9 @@
+import { spawn } from 'node:child_process';
+import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  app, BrowserWindow, ipcMain, Menu, nativeImage, safeStorage, shell, Tray,
+  app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, safeStorage, shell, Tray,
   type IpcMainInvokeEvent,
 } from 'electron';
 import { z } from 'zod';
@@ -10,20 +12,28 @@ import type { AppSnapshot, RendererSettings, SettingsUpdate } from '../shared/ap
 import type { PostSource } from '../shared/domain';
 import { RuleClassifier } from './classifier/ruleClassifier';
 import { MonitorCoordinator } from './monitoring/monitorCoordinator';
-import { DeliveryService } from './notifications/deliveryService';
+import { DurableDeliveryWorker } from './notifications/durableDeliveryWorker';
 import { EmailChannel } from './notifications/emailChannel';
-import { MailRetryWorker } from './notifications/retryWorker';
 import { WindowsChannel } from './notifications/windowsChannel';
 import { CredentialStore } from './security/credentialStore';
+import { ChromeCompanionBridge } from './sources/chromeCompanionBridge';
+import { ChromeCompanionSession } from './sources/chromeCompanionSession';
 import { ConfiguredSource } from './sources/configuredRssSource';
-import { ElectronXSession } from './sources/electronXSession';
 import { PublicRssSource } from './sources/publicRssSource';
 import { XBrowserSource } from './sources/xBrowserSource';
+import {
+  buildLoginItemSettings,
+  buildStartupShortcutDetails,
+  isHiddenStartup,
+  shouldShowForSecondInstance,
+  startupShortcutWriteOperation,
+} from './startup';
 import { AppDatabase, type AppSettings } from './storage/database';
 
 app.setAppUserModelId('com.tibowatch.desktop');
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
+const startHidden = isHiddenStartup(process.argv);
 
 const settingsUpdateSchema = z.object({
   pollIntervalMinutes: z.number().int().min(1).max(60).optional(),
@@ -31,10 +41,16 @@ const settingsUpdateSchema = z.object({
   publicRssEnabled: z.boolean().optional(),
   startAtLogin: z.boolean().optional(),
   closeToTray: z.boolean().optional(),
+  windowsConfirmedEnabled: z.boolean().optional(),
+  windowsPreviewEnabled: z.boolean().optional(),
+  windowsRelatedEnabled: z.boolean().optional(),
+  windowsConfirmedSound: z.boolean().optional(),
+  windowsPreviewSound: z.boolean().optional(),
+  windowsRelatedSound: z.boolean().optional(),
   baselineComplete: z.boolean().optional(),
   onboardingComplete: z.boolean().optional(),
   emailEnabled: z.boolean().optional(),
-  emailRecipients: z.array(z.string()).optional(),
+  emailRecipients: z.array(z.email()).max(50).optional(),
   smtpHost: z.string().max(255).optional(),
   smtpPort: z.number().int().min(1).max(65_535).optional(),
   smtpSecure: z.boolean().optional(),
@@ -47,10 +63,12 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let database: AppDatabase;
 let credentials: CredentialStore;
-let xSession: ElectronXSession;
+let chromeCompanionBridge: ChromeCompanionBridge;
+let xSession: ChromeCompanionSession;
 let coordinator: MonitorCoordinator;
 let emailChannel: EmailChannel;
-let retryWorker: MailRetryWorker;
+let deliveryWorker: DurableDeliveryWorker;
+let deliveryReady = false;
 let scheduleTimer: NodeJS.Timeout | null = null;
 let retryTimer: NodeJS.Timeout | null = null;
 let paused = false;
@@ -58,18 +76,55 @@ let checking = false;
 let quitting = false;
 let lastCheckedAt: string | null = null;
 let nextCheckAt: string | null = null;
+let lastCheckError: string | null = null;
+let runningCheck: Promise<void> | null = null;
+let shutdownReady = false;
+let shutdownStarted = false;
+let lastChromeDiagnostic = '';
 
-app.on('second-instance', () => showMainWindow());
+app.on('second-instance', (_event, commandLine) => {
+  if (shouldShowForSecondInstance(commandLine)) showMainWindow();
+});
 
 app.whenReady().then(async () => {
   database = new AppDatabase(join(app.getPath('userData'), 'tibo-watch.sqlite3'));
   credentials = new CredentialStore(database, safeStorage);
-  xSession = new ElectronXSession();
+  chromeCompanionBridge = new ChromeCompanionBridge({
+    ...(process.env.TIBO_WATCH_E2E === '1' ? { port: 0 } : {}),
+    onCollectionChanged: () => {
+      // Opt-in local diagnostics contain only collection state/counts, never
+      // page text, account details, SMTP settings or authentication material.
+      if (process.env.TIBO_WATCH_DIAGNOSTICS === '1') {
+        const status = chromeCompanionBridge.store.collectionStatus();
+        const signature = JSON.stringify(status);
+        if (signature !== lastChromeDiagnostic) {
+          lastChromeDiagnostic = signature;
+          console.info(JSON.stringify({ diagnostic: 'chrome-collection', at: new Date().toISOString(),
+            ...status, postCount: chromeCompanionBridge.readPosts().length }));
+        }
+      }
+      if (coordinator && mainWindow && !quitting) void broadcastSnapshot().catch(() => {});
+    },
+  });
+  syncCollectionEnabled();
+  try {
+    await chromeCompanionBridge.start();
+  } catch (error) {
+    console.error('Chrome companion bridge failed to start', error);
+  }
+  xSession = new ChromeCompanionSession(
+    chromeCompanionBridge.store,
+    showChromeCompanionSetup,
+    () => chromeCompanionBridge.setMonitoringEnabled(false),
+  );
   emailChannel = new EmailChannel({ database, getPassword: () => credentials.getSmtpPassword() });
   const windowsChannel = new WindowsChannel(database, (postId) => showMainWindow(postId));
-  retryWorker = new MailRetryWorker(database, emailChannel, (event) => {
-    new WindowsChannel(database, () => showMainWindow(event.postId)).deliver({ ...event, level: 'related' });
-    tray?.displayBalloon({ title: 'Tibo Watch 邮件发送失败', content: '三次重试均失败，请打开通知记录手动检查 SMTP 配置。' });
+  deliveryWorker = new DurableDeliveryWorker({
+    database, windows: windowsChannel, email: emailChannel,
+    onChanged: () => broadcastSnapshot(),
+    onFinalFailure: () => {
+      tray?.displayBalloon({ title: 'Tibo Watch 通知发送失败', content: '重试失败，请打开通知记录查看失败收件人与配置。' });
+    },
   });
   const rssSource: PostSource = process.env.TIBO_WATCH_E2E === '1'
     ? createE2eSource()
@@ -80,40 +135,49 @@ app.whenReady().then(async () => {
     database,
     sources: [browser, rss],
     classifier: new RuleClassifier(),
-    onSignal: async (event) => {
-      const channels = database.getSettings().emailEnabled
-        ? [windowsChannel, emailChannel]
-        : [windowsChannel];
-      const service = new DeliveryService({
-        channels,
-        enqueueRetry: (failedEvent, attempt) => retryWorker.enqueue(failedEvent, attempt),
-      });
-      const receipts = await service.deliver(event);
-      for (const receipt of receipts) database.recordDelivery(event.id, receipt);
-      await broadcastSnapshot();
-    },
+    onSignal: async () => { if (deliveryReady) await deliveryWorker.processDue(); },
     onOutage: () => {
-      tray?.displayBalloon({ title: 'Tibo Watch 监测中断', content: 'X 登录抓取和公共 RSS 已连续三个周期无成功数据。' });
+      tray?.displayBalloon({ title: 'Tibo Watch 监测中断', content: 'Chrome 登录共享和公共 RSS 已连续三个周期无成功数据。' });
     },
   });
 
   createMainWindow();
   createTray();
   registerIpc();
+  await coordinator.reclassifyStoredPosts();
+  deliveryReady = true;
+  await deliveryWorker.processDue();
   applyLoginItem(database.getSettings());
   restartSchedule();
   if (process.env.TIBO_WATCH_E2E !== '1') {
-    retryTimer = setInterval(() => void retryWorker.processDue(), 60_000);
+    retryTimer = setInterval(() => void deliveryWorker.processDue().catch(() => {
+      lastCheckError = 'DELIVERY_WORKER_FAILED';
+      void broadcastSnapshot();
+    }), 60_000);
   }
   await broadcastSnapshot();
 });
 
 app.on('activate', () => showMainWindow());
-app.on('before-quit', () => { quitting = true; });
+app.on('before-quit', (event) => {
+  if (shutdownReady) return;
+  event.preventDefault();
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  quitting = true;
+  chromeCompanionBridge?.setMonitoringEnabled(false);
+  if (scheduleTimer) clearTimeout(scheduleTimer);
+  if (retryTimer) clearInterval(retryTimer);
+  void Promise.allSettled([runningCheck, deliveryWorker?.stop(), chromeCompanionBridge?.stop()]).then(() => {
+    shutdownReady = true;
+    app.quit();
+  });
+});
 app.on('window-all-closed', () => { if (process.platform !== 'win32') app.quit(); });
 app.on('will-quit', () => {
   if (scheduleTimer) clearInterval(scheduleTimer);
   if (retryTimer) clearInterval(retryTimer);
+  void chromeCompanionBridge?.stop();
   database?.close();
 });
 
@@ -151,7 +215,7 @@ function createMainWindow(): void {
   });
   mainWindow.on('closed', () => { mainWindow = null; });
   mainWindow.once('ready-to-show', () => {
-    if (!app.getLoginItemSettings().wasOpenedAtLogin) mainWindow?.show();
+    if (!startHidden) mainWindow?.show();
   });
   const rendererUrl = process.env.VITE_DEV_SERVER_URL;
   if (rendererUrl) void mainWindow.loadURL(rendererUrl);
@@ -159,8 +223,10 @@ function createMainWindow(): void {
 }
 
 function createTray(): void {
-  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" rx="7" fill="#0a0f13"/><circle cx="16" cy="16" r="10" fill="none" stroke="#75df4b" stroke-width="3"/><path d="m11 16 3 3 7-8" fill="none" stroke="#75df4b" stroke-width="3"/></svg>';
-  const icon = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`).resize({ width: 16, height: 16 });
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'tray-icon.png')
+    : join(app.getAppPath(), 'build', 'icon.png');
+  const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
   tray = new Tray(icon);
   tray.setToolTip('Tibo Watch · Codex 重置监测');
   tray.on('click', () => showMainWindow());
@@ -189,8 +255,18 @@ function registerIpc(): void {
   });
   handle('app:check-now', z.tuple([]), async () => { await runCheck(); return snapshot(); });
   handle('app:set-paused', z.tuple([z.boolean()]), async ([value]) => { paused = value; restartSchedule(); rebuildTrayMenu(); return snapshot(); });
-  handle('app:open-x-login', z.tuple([]), async () => { xSession.openLogin(); return snapshot(); });
-  handle('app:logout-x', z.tuple([]), async () => { await xSession.logout(); return snapshot(); });
+  handle('app:open-x-login', z.tuple([]), async () => {
+    database.updateSettings({ browserSourceEnabled: true });
+    syncCollectionEnabled();
+    xSession.openLogin();
+    return snapshot();
+  });
+  handle('app:logout-x', z.tuple([]), async () => {
+    database.updateSettings({ browserSourceEnabled: false });
+    syncCollectionEnabled();
+    await xSession.logout();
+    return snapshot();
+  });
   handle('app:test-email', z.tuple([]), async () => {
     const receipt = await emailChannel.sendTestEmail();
     return { ok: receipt.state === 'sent', errorCode: receipt.errorCode };
@@ -202,20 +278,10 @@ function registerIpc(): void {
     return snapshot();
   });
   handle('app:retry-mail', z.tuple([z.string().min(1).max(128)]), async ([id]) => {
-    const item = database.listMailQueue().find((candidate) => candidate.id === id);
-    const event = item ? database.getSignalEvent(item.eventId) : undefined;
-    if (!item || !event) throw new Error('Mail queue item was not found');
-    const receipt = await emailChannel.deliver(event);
-    database.recordDelivery(event.id, receipt);
-    if (receipt.state === 'sent') database.markMailSent(item.id);
-    else {
-      database.rescheduleMail(
-        item.id,
-        1,
-        new Date(Date.now() + 60_000).toISOString(),
-        receipt.errorCode ?? 'SMTP_SEND_FAILED',
-      );
-    }
+    const eventId = database.getSignalEvent(id)?.id
+      ?? database.listMailQueue().find((item) => item.id === id)?.eventId;
+    if (!eventId) throw new Error('DELIVERY_EVENT_NOT_FOUND');
+    await deliveryWorker.retryFailed(new Date(), eventId);
     return snapshot();
   });
   handle('window:action', z.tuple([z.enum(['minimize', 'maximize', 'close'])]), ([action]) => {
@@ -240,38 +306,56 @@ function handle<T extends z.ZodTuple, R>(
 }
 
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
-  if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error('Untrusted IPC sender');
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('Untrusted IPC sender');
 }
 
-async function runCheck(): Promise<void> {
-  if (paused || checking) return;
+function runCheck(): Promise<void> {
+  if (runningCheck) return runningCheck;
+  if (paused || quitting) return Promise.resolve();
+  runningCheck = performCheck().finally(() => { runningCheck = null; });
+  return runningCheck;
+}
+
+async function performCheck(): Promise<void> {
   checking = true;
+  lastCheckError = null;
+  if (scheduleTimer) clearTimeout(scheduleTimer);
+  nextCheckAt = null;
   rebuildTrayMenu();
-  await broadcastSnapshot();
   try {
+    await broadcastSnapshot();
     lastCheckedAt = new Date().toISOString();
     await coordinator.checkNow(lastCheckedAt);
-    nextCheckAt = new Date(Date.now() + database.getSettings().pollIntervalMinutes * 60_000).toISOString();
+    await deliveryWorker.processDue();
+  } catch {
+    lastCheckError = 'CHECK_FAILED';
   } finally {
     checking = false;
+    restartSchedule();
     rebuildTrayMenu();
     await broadcastSnapshot();
   }
 }
 
 function restartSchedule(): void {
-  if (scheduleTimer) clearInterval(scheduleTimer);
+  syncCollectionEnabled();
+  if (scheduleTimer) clearTimeout(scheduleTimer);
   scheduleTimer = null;
-  if (paused) { nextCheckAt = null; return; }
+  if (paused || checking || quitting) { nextCheckAt = null; return; }
   const interval = database.getSettings().pollIntervalMinutes * 60_000;
   nextCheckAt = new Date(Date.now() + interval).toISOString();
   if (process.env.TIBO_WATCH_E2E !== '1') {
-    scheduleTimer = setInterval(() => void runCheck(), interval);
+    scheduleTimer = setTimeout(() => void runCheck(), interval);
   }
+}
+
+function syncCollectionEnabled(): void {
+  chromeCompanionBridge?.setMonitoringEnabled(!paused && !quitting && database.getSettings().browserSourceEnabled);
 }
 
 async function snapshot(): Promise<AppSnapshot> {
   const settings = database.getSettings();
+  const chromeStatus = xSession.collectionStatus();
   const rendererSettings: RendererSettings = {
     ...settings,
     hasSmtpPassword: database.getEncryptedSecret('smtp-password') !== null,
@@ -282,9 +366,17 @@ async function snapshot(): Promise<AppSnapshot> {
     events: database.listSignalEvents(),
     sourceHealth: coordinator.health.list().map((health) => ({
       ...health,
-      label: health.sourceId === 'x-browser' ? 'X 登录抓取' : '公共 RSS',
+      ...(health.sourceId === 'x-browser' && settings.browserSourceEnabled ? {
+        ...chromeStatus,
+        consecutiveFailures: chromeStatus.state === 'online' ? 0 : health.consecutiveFailures,
+      } : {}),
+      ...(!(health.sourceId === 'x-browser' ? settings.browserSourceEnabled : settings.publicRssEnabled) ? { state: 'disabled' as const, errorCode: null } : {}),
+      label: health.sourceId === 'x-browser' ? 'Chrome 登录共享' : '公共 RSS',
     })),
     mailQueue: database.listMailQueue(),
+    deliveries: database.listDeliveryStatuses(),
+    windowsNotificationsSupported: Notification.isSupported(),
+    lastCheckError,
     paused,
     checking,
     xLoggedIn: await xSession.isLoggedIn(),
@@ -309,13 +401,68 @@ function showMainWindow(postId?: string): void {
 
 function applyLoginItem(settings: AppSettings): void {
   if (process.env.TIBO_WATCH_E2E === '1') return;
-  app.setLoginItemSettings({ openAtLogin: settings.startAtLogin, openAsHidden: true });
+  if (process.platform !== 'win32') {
+    app.setLoginItemSettings(buildLoginItemSettings(
+      settings.startAtLogin,
+      process.platform,
+      process.execPath,
+    ));
+    return;
+  }
+
+  // Remove the legacy Run entry. Windows can retain its old command line across
+  // upgrades, which caused login launches to lose the --hidden argument.
+  app.setLoginItemSettings(buildLoginItemSettings(false, 'win32', process.execPath));
+
+  const shortcutPath = join(
+    app.getPath('appData'),
+    'Microsoft',
+    'Windows',
+    'Start Menu',
+    'Programs',
+    'Startup',
+    'Tibo Watch.lnk',
+  );
+  if (!settings.startAtLogin) {
+    rmSync(shortcutPath, { force: true });
+    return;
+  }
+
+  const shortcutWritten = shell.writeShortcutLink(
+    shortcutPath,
+    startupShortcutWriteOperation(existsSync(shortcutPath)),
+    buildStartupShortcutDetails(process.execPath),
+  );
+  if (!shortcutWritten) console.error('Failed to create the Tibo Watch startup shortcut');
+}
+
+function showChromeCompanionSetup(): void {
+  if (process.env.TIBO_WATCH_E2E === '1') return;
+  const extensionDirectory = app.isPackaged
+    ? join(process.resourcesPath, 'chrome-extension')
+    : join(app.getAppPath(), 'chrome-extension');
+  shell.showItemInFolder(join(extensionDirectory, 'manifest.json'));
+
+  const candidates = [
+    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env.PROGRAMFILES && join(process.env.PROGRAMFILES, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env['PROGRAMFILES(X86)'] && join(process.env['PROGRAMFILES(X86)'], 'Google', 'Chrome', 'Application', 'chrome.exe'),
+  ].filter((value): value is string => Boolean(value));
+  const chromeExecutable = candidates.find((candidate) => existsSync(candidate));
+  if (chromeExecutable) {
+    spawn(chromeExecutable, ['chrome://extensions', 'https://x.com/thsottiaux/with_replies'], {
+      detached: true,
+      stdio: 'ignore',
+    }).unref();
+  } else {
+    void shell.openExternal('https://x.com/thsottiaux/with_replies');
+  }
 }
 
 function isAllowedPostUrl(value: string): boolean {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' && ['x.com', 'twitter.com'].includes(url.hostname) && /^\/thsottiaux\/status\/\d+/.test(url.pathname);
+    return url.protocol === 'https:' && ['x.com', 'twitter.com'].includes(url.hostname) && /^\/thsottiaux\/status\/\d+\/?$/.test(url.pathname);
   } catch {
     return false;
   }
@@ -324,34 +471,37 @@ function isAllowedPostUrl(value: string): boolean {
 function createE2eSource(): PostSource {
   return {
     id: 'public-rss',
-    check: async ({ checkedAt }) => ({
-      sourceId: 'public-rss',
-      checkedAt,
-      state: 'online',
-      latencyMs: 4,
-      errorCode: null,
-      posts: [
-        {
-          id: 'e2e-confirmed',
-          authorHandle: 'thsottiaux',
-          text: "I've reset usage limits for all ChatGPT Work and Codex users.",
-          createdAt: '2026-07-31T04:53:19.000Z',
-          url: 'https://x.com/thsottiaux/status/2083053369351090254',
-          kind: 'original',
-          quotedText: null,
-          sourceIds: ['public-rss'],
-        },
-        {
-          id: 'e2e-preview',
-          authorHandle: 'thsottiaux',
-          text: 'Codex resets will continue tomorrow.',
-          createdAt: '2026-07-31T04:50:00.000Z',
-          url: 'https://x.com/thsottiaux/status/2083053000000000000',
-          kind: 'original',
-          quotedText: null,
-          sourceIds: ['public-rss'],
-        },
-      ],
-    }),
+    check: async ({ checkedAt }) => {
+      const previewCreatedAt = new Date(Date.parse(checkedAt) - 3 * 60_000).toISOString();
+      return {
+        sourceId: 'public-rss',
+        checkedAt,
+        state: 'online',
+        latencyMs: 4,
+        errorCode: null,
+        posts: [
+          {
+            id: '2083053369351090254',
+            authorHandle: 'thsottiaux',
+            text: "I've reset usage limits for all ChatGPT Work and Codex users.",
+            createdAt: checkedAt,
+            url: 'https://x.com/thsottiaux/status/2083053369351090254',
+            kind: 'original',
+            quotedText: null,
+            sourceIds: ['public-rss'],
+          },
+          {
+            id: '2083053000000000000',
+            authorHandle: 'thsottiaux',
+            text: 'Codex resets will continue tomorrow.',
+            createdAt: previewCreatedAt,
+            url: 'https://x.com/thsottiaux/status/2083053000000000000',
+            kind: 'original',
+            quotedText: null,
+            sourceIds: ['public-rss'],
+          },
+        ],
+      };
+    },
   };
 }

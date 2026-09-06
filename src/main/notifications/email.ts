@@ -23,7 +23,7 @@ export interface EmailMessage {
 
 const SOURCE_LABELS: Record<string, string> = {
   'public-rss': '公共 RSS',
-  'x-browser': 'X 登录会话',
+  'x-browser': 'Chrome 登录共享',
 };
 
 export function retryDelayMinutes(attempt: number): number | null {
@@ -64,7 +64,7 @@ export function buildEmailMessage(
       post.quotedText ? `引用内容：${post.quotedText}` : null,
       `发布时间（北京时间）：${beijingTime}`,
       `判定依据：${classification.reasons.join('；')}`,
-      `命中词：${classification.matchedTerms.join('、') || '无'}`,
+      `判定证据：${classification.matchedTerms.join('、') || '无'}`,
       `来源状态：${sourceStatus || '未知来源'}`,
       `原帖链接：${post.url}`,
       '',

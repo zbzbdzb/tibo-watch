@@ -29,7 +29,7 @@ describe('MailRetryWorker', () => {
     expect(database.listMailQueue()[0]).toMatchObject({ attempt: 3, nextAttemptAt: '2026-07-31T05:21:00.000Z' });
     await worker.processDue(new Date('2026-07-31T05:21:00.000Z'));
     expect(database.listMailQueue().find((item) => item.id === queueId)?.status).toBe('failed');
-    expect(finalFailure).toHaveBeenCalledWith(event);
+    expect(finalFailure).toHaveBeenCalledWith({ ...event, postId: '700' });
     database.close();
   });
 });

@@ -1,6 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
-import type { AppDatabase } from '../storage/database';
+import { freshAlertEligible, type AppDatabase } from '../storage/database';
+import { canonicalPostId, mergeCanonicalPost } from '../storage/canonicalPost';
 import { decideSignalEvent } from '../events/signalPolicy';
 import { SourceHealthTracker } from './sourceHealthTracker';
 import type {
@@ -54,6 +55,43 @@ export class MonitorCoordinator {
     return this.activeCheck;
   }
 
+  async reclassifyStoredPosts(detectedAt = new Date().toISOString()): Promise<{
+    postsReclassified: number;
+    signalsEmitted: number;
+  }> {
+    let postsReclassified = 0;
+    let signalsEmitted = 0;
+    const baseline = !this.database.getSettings().baselineComplete;
+
+    for (const post of this.database.listPosts()) {
+      const previousClassification = this.database.getLatestClassification(post.id);
+      const inputHash = classificationInputHash(post, this.classifier.id);
+      if (previousClassification?.inputHash === inputHash) continue;
+
+      const classification = await this.classifier.classify({ post });
+      postsReclassified += 1;
+      const decision = decideSignalEvent({
+        baseline: baseline || !previousClassification,
+        previousLevel: previousClassification?.level ?? null,
+        currentLevel: classification.level,
+      });
+      const event: SignalEvent | null = decision && decision.level !== 'related' && freshAlertEligible(decision.level, post.createdAt, detectedAt) ? {
+        id: randomUUID(),
+        postId: post.id,
+        level: decision.level,
+        previousLevel: decision.previousLevel,
+        isEscalation: decision.isEscalation,
+        detectedAt,
+      } : null;
+      const inserted = this.database.recordClassificationAndSignal(post.id, classification, inputHash, event);
+      if (!event || !inserted) continue;
+      signalsEmitted += 1;
+      try { await this.onSignal(event); } catch { /* Durable jobs are resumed by the worker. */ }
+    }
+
+    return { postsReclassified, signalsEmitted };
+  }
+
   private async performCheck(checkedAt: string): Promise<CheckSummary> {
     const controller = new AbortController();
     const results = await Promise.all(
@@ -74,7 +112,7 @@ export class MonitorCoordinator {
     );
 
     for (const result of results) {
-      this.health.recordState(result.sourceId, result.state, result.checkedAt);
+      this.health.recordState(result.sourceId, result.state, result.checkedAt, result.errorCode);
       this.database.recordSourceObservation(result);
     }
 
@@ -83,28 +121,31 @@ export class MonitorCoordinator {
     let signalsEmitted = 0;
 
     for (const post of posts) {
-      const previousClassification = this.database.getLatestClassification(post.id);
       this.database.upsertPost(post);
-      const classification = await this.classifier.classify({ post });
-      this.database.recordClassification(post.id, classification);
+      const canonicalPost = this.database.getPost(post.id);
+      if (!canonicalPost) throw new Error(`Canonical post was not persisted: ${post.id}`);
+      const previousClassification = this.database.getLatestClassification(post.id);
+      const inputHash = classificationInputHash(canonicalPost, this.classifier.id);
+      if (previousClassification?.inputHash === inputHash) continue;
+
+      const classification = await this.classifier.classify({ post: canonicalPost });
       const decision = decideSignalEvent({
         baseline,
         previousLevel: previousClassification?.level ?? null,
         currentLevel: classification.level,
       });
-      if (!decision) continue;
-
-      const event: SignalEvent = {
+      const event: SignalEvent | null = decision && freshAlertEligible(decision.level, canonicalPost.createdAt, checkedAt) ? {
         id: randomUUID(),
         postId: post.id,
         level: decision.level,
         previousLevel: decision.previousLevel,
         isEscalation: decision.isEscalation,
         detectedAt: checkedAt,
-      };
-      if (!this.database.insertSignalEvent(event)) continue;
+      } : null;
+      const inserted = this.database.recordClassificationAndSignal(post.id, classification, inputHash, event);
+      if (!event || !inserted) continue;
       signalsEmitted += 1;
-      await this.onSignal(event);
+      try { await this.onSignal(event); } catch { /* Wakeup failure cannot discard committed intent or block other posts. */ }
     }
 
     if (baseline && results.some((result) => result.state === 'online')) {
@@ -118,20 +159,22 @@ export class MonitorCoordinator {
   }
 }
 
+function classificationInputHash(post: MonitoredPost, classifierId: string): string {
+  const canonicalInput = JSON.stringify({
+    text: post.text,
+    quotedText: post.quotedText,
+    kind: post.kind,
+    classifierId,
+  });
+  return createHash('sha256').update(canonicalInput, 'utf8').digest('hex');
+}
+
 function mergePosts(posts: MonitoredPost[]): MonitoredPost[] {
   const merged = new Map<string, MonitoredPost>();
   for (const post of posts) {
-    const existing = merged.get(post.id);
-    if (!existing) {
-      merged.set(post.id, post);
-      continue;
-    }
-    merged.set(post.id, {
-      ...existing,
-      text: post.text.length > existing.text.length ? post.text : existing.text,
-      quotedText: post.quotedText ?? existing.quotedText,
-      sourceIds: [...new Set([...existing.sourceIds, ...post.sourceIds])],
-    });
+    const id = canonicalPostId(post);
+    const normalized = { ...post, id };
+    merged.set(id, mergeCanonicalPost(normalized, merged.get(id) ?? normalized));
   }
   return [...merged.values()];
 }

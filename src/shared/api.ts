@@ -1,4 +1,5 @@
-import type { ClassificationResult, MonitoredPost, SignalEvent, SourceState } from './domain';
+import type { ClassificationResult, DeliveryStatusView, MonitoredPost, SignalEvent, SourceState } from './domain';
+export type { DeliveryStatusView } from './domain';
 
 export interface RendererSettings {
   pollIntervalMinutes: number;
@@ -6,6 +7,12 @@ export interface RendererSettings {
   publicRssEnabled: boolean;
   startAtLogin: boolean;
   closeToTray: boolean;
+  windowsConfirmedEnabled: boolean;
+  windowsPreviewEnabled: boolean;
+  windowsRelatedEnabled: boolean;
+  windowsConfirmedSound: boolean;
+  windowsPreviewSound: boolean;
+  windowsRelatedSound: boolean;
   baselineComplete: boolean;
   onboardingComplete: boolean;
   emailEnabled: boolean;
@@ -30,6 +37,7 @@ export interface SourceHealthView {
   consecutiveFailures: number;
   lastCheckedAt: string | null;
   lastSuccessAt: string | null;
+  errorCode?: string | null;
 }
 
 export interface MailQueueView {
@@ -47,6 +55,9 @@ export interface AppSnapshot {
   events: SignalEvent[];
   sourceHealth: SourceHealthView[];
   mailQueue: MailQueueView[];
+  deliveries: DeliveryStatusView[];
+  windowsNotificationsSupported: boolean;
+  lastCheckError: string | null;
   paused: boolean;
   checking: boolean;
   xLoggedIn: boolean;

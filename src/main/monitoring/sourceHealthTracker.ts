@@ -6,6 +6,7 @@ export interface SourceHealth {
   consecutiveFailures: number;
   lastCheckedAt: string | null;
   lastSuccessAt: string | null;
+  errorCode?: string | null;
 }
 
 export class SourceHealthTracker {
@@ -28,7 +29,7 @@ export class SourceHealthTracker {
     return this.recordState(sourceId, succeeded ? 'online' : 'error', checkedAt);
   }
 
-  recordState(sourceId: string, state: SourceState, checkedAt: string): SourceHealth {
+  recordState(sourceId: string, state: SourceState, checkedAt: string, errorCode: string | null = null): SourceHealth {
     const previous = this.sources.get(sourceId) ?? {
       sourceId,
       state: 'disabled' as const,
@@ -37,7 +38,7 @@ export class SourceHealthTracker {
       lastSuccessAt: null,
     };
     if (state === 'disabled') {
-      const disabled = { ...previous, state, consecutiveFailures: 0, lastCheckedAt: checkedAt };
+      const disabled = { ...previous, state, consecutiveFailures: 0, lastCheckedAt: checkedAt, errorCode: null };
       this.sources.set(sourceId, disabled);
       return disabled;
     }
@@ -45,10 +46,11 @@ export class SourceHealthTracker {
     const consecutiveFailures = succeeded ? 0 : previous.consecutiveFailures + 1;
     const next: SourceHealth = {
       sourceId,
-      state: succeeded ? 'online' : consecutiveFailures >= 3 ? 'stale' : state,
+      state: succeeded ? 'online' : state === 'needs_login' ? state : consecutiveFailures >= 3 ? 'stale' : state,
       consecutiveFailures,
       lastCheckedAt: checkedAt,
       lastSuccessAt: succeeded ? checkedAt : previous.lastSuccessAt,
+      errorCode,
     };
     this.sources.set(sourceId, next);
 
@@ -69,7 +71,7 @@ export class SourceHealthTracker {
   consumeOutageIncident(): boolean {
     const activeSources = [...this.sources.values()].filter((health) => health.state !== 'disabled');
     const allStale = activeSources.length > 0 && activeSources.every(
-      (health) => health.state === 'stale',
+      (health) => health.consecutiveFailures >= 3,
     );
     if (!allStale || this.outageIncidentConsumed) return false;
     this.outageIncidentConsumed = true;
