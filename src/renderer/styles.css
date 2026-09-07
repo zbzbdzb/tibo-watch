@@ -342,6 +342,20 @@ svg {
 .health-row .status-disabled i {
   background: #66737b;
 }
+.status-warning, .health-row .status-warning { color: #efb84b; }
+.source-grid em.status-warning, .login-status em.status-warning { color: #efb84b; }
+.source-grid em.status-error, .login-status em.status-error { color: #ef6262; }
+.source-grid em.status-disabled, .login-status em.status-disabled { color: #9aa6ad; }
+.app[data-theme="light"] .source-grid em.status-warning,
+.app[data-theme="light"] .login-status em.status-warning { color: #895900; }
+.app[data-theme="light"] .source-grid em.status-error,
+.app[data-theme="light"] .login-status em.status-error { color: #b42332; }
+.app[data-theme="light"] .source-grid em.status-disabled,
+.app[data-theme="light"] .login-status em.status-disabled { color: #66737b; }
+.health-row .status-warning i { background: #efb84b; }
+.app[data-theme="light"] .status-warning,
+.app[data-theme="light"] .health-row .status-warning { color: #895900; }
+.app[data-theme="light"] .health-row .status-warning i { background: #895900; }
 .runtime-state label:nth-of-type(2) {
   margin-top: 10px;
 }
@@ -600,10 +614,14 @@ svg {
 .source-grid section {
   border: 1px solid #263038;
   padding: 20px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .source-grid em {
   color: #75df4b;
 }
+.collection-diagnostic { border-top: 1px solid #66737b; margin-top: 16px; padding-top: 12px; overflow-wrap: anywhere; }
+.collection-diagnostic p { margin: 8px 0; font-size: 14px; }
 .notification-list > div {
   display: flex;
   gap: 16px;

@@ -259,8 +259,8 @@ test.describe.serial('Tibo Watch Electron app', () => {
     await page.getByRole('button', { name: '切换到浅色模式' }).click();
 
     const colors = await page.evaluate(() => {
-      const online = document.querySelector<HTMLElement>('.health-row em:not(.status-error):not(.status-disabled)');
-      const error = document.querySelector<HTMLElement>('.health-row .status-error');
+      const online = document.querySelector<HTMLElement>('.health-row em:not(.status-error):not(.status-disabled):not(.status-warning)');
+      const error = document.querySelector<HTMLElement>('.health-row .status-warning');
       const disabled = document.querySelector<HTMLElement>('.health-row .status-disabled');
       if (!online || !error || !disabled) throw new Error('Runtime semantic states are incomplete');
       return {

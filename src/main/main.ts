@@ -95,7 +95,7 @@ app.whenReady().then(async () => {
       // Opt-in local diagnostics contain only collection state/counts, never
       // page text, account details, SMTP settings or authentication material.
       if (process.env.TIBO_WATCH_DIAGNOSTICS === '1') {
-        const status = chromeCompanionBridge.store.collectionStatus();
+        const status = { ...chromeCompanionBridge.store.collectionStatus(), pages: chromeCompanionBridge.store.diagnostics() };
         const signature = JSON.stringify(status);
         if (signature !== lastChromeDiagnostic) {
           lastChromeDiagnostic = signature;
@@ -152,8 +152,7 @@ app.whenReady().then(async () => {
   if (process.env.TIBO_WATCH_E2E !== '1') {
     retryTimer = setInterval(() => void deliveryWorker.processDue().catch(() => {
       lastCheckError = 'DELIVERY_WORKER_FAILED';
-      void broadcastSnapshot();
-    }), 60_000);
+    }).finally(() => broadcastSnapshot()).catch(() => {}), 60_000);
   }
   await broadcastSnapshot();
 });
@@ -368,7 +367,9 @@ async function snapshot(): Promise<AppSnapshot> {
       ...health,
       ...(health.sourceId === 'x-browser' && settings.browserSourceEnabled ? {
         ...chromeStatus,
-        consecutiveFailures: chromeStatus.state === 'online' ? 0 : health.consecutiveFailures,
+        consecutiveFailures: ['online', 'syncing', 'partial'].includes(chromeStatus.state) ? 0 : health.consecutiveFailures,
+        lastSuccessAt: chromeCompanionBridge.store.lastSuccessfulCollectionAt() ?? health.lastSuccessAt,
+        collectionDiagnostics: chromeCompanionBridge.store.diagnostics(),
       } : {}),
       ...(!(health.sourceId === 'x-browser' ? settings.browserSourceEnabled : settings.publicRssEnabled) ? { state: 'disabled' as const, errorCode: null } : {}),
       label: health.sourceId === 'x-browser' ? 'Chrome 登录共享' : '公共 RSS',

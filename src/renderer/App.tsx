@@ -38,6 +38,7 @@ import type { SignalLevel } from "../shared/domain";
 import { selectCurrentSignal } from "./currentSignal";
 import { demoSnapshot, emptySnapshot } from "./demoData";
 import { deliveryLabel, deliveryTone, latestDelivery } from "./deliveryStatus";
+import { collectionReason, sourceStatus } from "./sourceStatus";
 
 type Page = "overview" | "activity" | "sources" | "notifications" | "settings";
 type Theme = "dark" | "light";
@@ -538,7 +539,18 @@ function Sources({
             <Status state={source.state} errorCode={source.errorCode ?? null} />
             <p>连续失败：{source.consecutiveFailures} 次</p>
             <p>最近成功：{fullDate(source.lastSuccessAt)}</p>
-            {source.errorCode && <p className="action-error">诊断：{source.errorCode}</p>}
+            {source.errorCode && <p className={sourceStatus(source.state, source.errorCode).tone}>
+              {sourceStatus(source.state, source.errorCode).description}<br />诊断：{source.errorCode}
+            </p>}
+            {source.collectionDiagnostics?.map(diagnostic => (
+              <div className="collection-diagnostic" key={diagnostic.view}>
+                <strong>{diagnostic.view === "posts" ? "帖子页" : "回复页"}</strong>
+                <p>运行扩展：{diagnostic.extensionVersion ?? "旧版（未上报版本）"} · 采集器：{diagnostic.collectorRevision ?? "未知"}</p>
+                <p>{collectionReason(diagnostic.reason)}</p>
+                <p>收到报告：{fullDate(diagnostic.receivedAt)}</p>
+                <p>本页 {diagnostic.postCount} 条 · 正文待补全 {diagnostic.pendingDetails} 条 · 采样 {diagnostic.samples} 次</p>
+              </div>
+            ))}
           </section>
         ))}
       </div>
@@ -729,12 +741,8 @@ function SettingsPage({
         <div className="settings-column">
           <SettingsSection title="Chrome 登录共享">
             <div className="login-status">
-              <span>
-                <i className={`status-dot ${snapshot.xLoggedIn ? "" : "disconnected-dot"}`} />{" "}
-                {snapshot.xLoggedIn
-                  ? "已连接 · 正在使用 Chrome X 会话"
-                  : "扩展未连接"}
-              </span>
+              <Status state={snapshot.sourceHealth.find(source => source.sourceId === "x-browser")?.state ?? "disabled"}
+                errorCode={snapshot.sourceHealth.find(source => source.sourceId === "x-browser")?.errorCode ?? null} />
               <div>
                 <button
                   className="outline-button"
@@ -747,7 +755,7 @@ function SettingsPage({
                   <RefreshCw />
                   安装/打开扩展
                 </button>
-                {snapshot.xLoggedIn && (
+                {snapshot.settings.browserSourceEnabled && (
                   <button
                     className="neutral-button"
                     onClick={async () => {
@@ -1057,25 +1065,11 @@ function Empty({ label }: { label: string }) {
   );
 }
 function Status({ state, errorCode }: { state: string; errorCode?: string | null }) {
-  const disabled = state === "disabled";
+  const status = sourceStatus(state, errorCode);
   return (
-    <em
-      className={
-        state === "online" ? "" : disabled ? "status-disabled" : "status-error"
-      }
-    >
+    <em className={status.tone} title={status.description}>
       <i />
-      {errorCode === "X_COMPANION_WAITING" ? "等待扩展"
-        : errorCode === "X_COMPANION_LEGACY_NEEDS_REFRESH" ? "需重载扩展"
-        : state === "online"
-        ? "在线"
-        : state === "stale"
-          ? "已过期"
-          : state === "needs_login"
-            ? "需登录"
-            : disabled
-              ? "已停用"
-              : "异常"}
+      {status.label}
     </em>
   );
 }

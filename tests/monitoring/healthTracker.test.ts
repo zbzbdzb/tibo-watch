@@ -3,6 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { SourceHealthTracker } from '../../src/main/monitoring/sourceHealthTracker';
 
 describe('SourceHealthTracker', () => {
+  it.each(['syncing', 'partial'] as const)('does not count %s as failure or generate an outage', (state) => {
+    const tracker = new SourceHealthTracker(['x-browser']);
+    tracker.record('x-browser', true, '2026-09-07T07:00:00Z');
+    for (let index = 0; index < 5; index++) tracker.recordState('x-browser', state, '2026-09-07T07:05:00Z');
+    expect(tracker.get('x-browser')).toMatchObject({ state, consecutiveFailures: 0, lastSuccessAt: '2026-09-07T07:00:00Z' });
+    expect(tracker.consumeOutageIncident()).toBe(false);
+  });
   it('preserves actionable login diagnostics through repeated failures', () => {
     const tracker = new SourceHealthTracker(['x-browser']);
     for (let index = 0; index < 4; index += 1) tracker.recordState('x-browser', 'needs_login', '2026-09-05T00:00:00Z', 'X_SESSION_EXPIRED');

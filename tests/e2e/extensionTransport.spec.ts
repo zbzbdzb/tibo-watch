@@ -46,6 +46,7 @@ test('real MV3 worker health GET and authenticated POST reach the loopback bridg
           headers: { ...headers, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             protocolVersion: 2, generation: permission.generation, runId,
+            diagnostics: { extensionVersion: '0.2.16', collectorRevision: 1, reason: 'stable_timeline', samples: 5 },
             pageUrl: `https://x.com/thsottiaux${view === 'replies' ? '/with_replies' : ''}`,
             view, checkedAt: new Date().toISOString(), result: 'ready',
             posts: [{

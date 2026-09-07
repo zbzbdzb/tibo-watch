@@ -7,6 +7,27 @@ import { demoSnapshot } from '../../src/renderer/demoData';
 import '../../src/renderer/styles.css';
 
 describe('App navigation and appearance controls', () => {
+  it.each([
+    ['syncing', 'X_COLLECTION_POSTS_LOADING', '同步中'],
+    ['partial', 'X_COLLECTION_DETAILS_PENDING', '部分采集完成'],
+    ['stale', 'X_COLLECTION_POSTS_STALE', '数据已超时'],
+    ['needs_login', 'X_SESSION_EXPIRED', '需重新登录'],
+  ] as const)('keeps %s truthful across overview, source details and settings', (state, errorCode, label) => {
+    const source = demoSnapshot.sourceHealth[0]!;
+    const before = { ...source };
+    Object.assign(source, { state, errorCode });
+    try {
+      render(<App />);
+      expect(screen.getByText(label)).toBeVisible();
+      expect(screen.queryByText('已过期')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: '查看详细状态' }));
+      expect(screen.getByText(label)).toBeVisible();
+      expect(screen.getByText(new RegExp(errorCode))).toBeVisible();
+      fireEvent.click(screen.getByRole('button', { name: '设置', exact: true }));
+      expect(screen.getByText(label)).toBeVisible();
+      expect(screen.queryByText('扩展未连接')).not.toBeInTheDocument();
+    } finally { Object.assign(source, before); if (!before.errorCode) delete source.errorCode; }
+  });
   it('restores independent Windows notification and sound controls with immediate persistence', async () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: '设置', exact: true }));
@@ -187,7 +208,7 @@ describe('App navigation and appearance controls', () => {
       fireEvent.click(screen.getByRole('button', { name: '切换到浅色模式' }));
 
       const online = screen.getByText('在线');
-      const error = screen.getByText('异常');
+      const error = screen.getByText('采集异常');
       const disabled = screen.getByText('未启用');
       expect(error).toHaveClass('status-error');
       expect(disabled).toHaveClass('status-disabled');

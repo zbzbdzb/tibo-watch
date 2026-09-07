@@ -169,6 +169,7 @@ describe('Chrome companion loopback bridge', () => {
 
 function current(generation: number) {
   return { ...validPayload, protocolVersion: 2, generation,
+    diagnostics: { extensionVersion: '0.2.16', collectorRevision: 1, reason: 'stable_timeline', samples: 5 },
     runId: 'cfcbce1e-783e-45c5-aee8-98e848ff89a6', view: 'replies',
     checkedAt: new Date().toISOString(), result: 'ready' };
 }

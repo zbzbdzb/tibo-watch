@@ -5,6 +5,7 @@ import { randomInt } from 'node:crypto';
 import { z } from 'zod';
 
 import type { MonitoredPost, SourceState } from '../../shared/domain';
+import { CHROME_COLLECTOR_REVISION, COLLECTION_REASONS, type ChromePageDiagnostic } from '../../shared/chromeDiagnostics';
 
 export const CHROME_COMPANION_EXTENSION_ID = 'cnhojdncaimngpikaokmgpnihhglnmkn';
 export const CHROME_COMPANION_ORIGIN = `chrome-extension://${CHROME_COMPANION_EXTENSION_ID}`;
@@ -37,6 +38,13 @@ const currentPayloadSchema = z.object({
   view: z.enum(['posts', 'replies']),
   checkedAt: z.iso.datetime(),
   result: z.enum(['ready', 'empty', 'loading', 'error', 'needs_login']),
+  pendingDetails: z.number().int().min(0).max(100).optional(),
+  diagnostics: z.object({
+    extensionVersion: z.string().regex(/^\d+\.\d+\.\d+(?:\.\d+)?$/).max(32),
+    collectorRevision: z.literal(CHROME_COLLECTOR_REVISION),
+    reason: z.enum(COLLECTION_REASONS),
+    samples: z.number().int().min(0).max(30),
+  }).strict().optional(),
   posts: z.array(postSchema).max(100),
 }).strict().refine((payload) =>
   payload.pageUrl === PAGE_URLS[payload.view === 'posts' ? 0 : 1] &&
@@ -51,6 +59,8 @@ interface PageCollection {
   checkedAt: number;
   receivedAt: number;
   runId: string | null;
+  pendingDetails: number;
+  diagnostic: ChromePageDiagnostic;
 }
 
 function richerText(left: string | null, right: string | null): string | null {
@@ -67,9 +77,12 @@ export interface ChromeCollectionStatus {
 export class ChromeCompanionStore {
   private readonly posts = new Map<string, MonitoredPost>();
   private lastReceivedAt: number | null = null;
+  private firstReceivedAt: number | null = null;
+  private lastCompleteAt: number | null = null;
   private readonly pages = new Map<string, PageCollection>();
   private monitoringEnabled = true;
   private hasCurrentProtocol = false;
+  private hasCurrentCollector = false;
   private readonly now: () => number;
   private readonly freshnessMs: number;
 
@@ -83,6 +96,13 @@ export class ChromeCompanionStore {
     payload = payloadSchema.parse(payload);
     if (!this.monitoringEnabled) return;
     const current = 'protocolVersion' in payload ? payload : null;
+    if (this.hasCurrentCollector && !current?.diagnostics) return;
+    if (current?.diagnostics && !this.hasCurrentCollector) {
+      this.hasCurrentCollector = true;
+      this.pages.clear();
+      this.firstReceivedAt = null;
+      this.lastCompleteAt = null;
+    }
     // A request already in flight from the replaced worker may arrive after the
     // new worker. It must not regress an observed v2 session to "needs reload".
     if (!current && this.hasCurrentProtocol) return;
@@ -111,38 +131,96 @@ export class ChromeCompanionStore {
       for (const post of this.readPosts().slice(1_000)) this.posts.delete(post.id);
     }
     this.lastReceivedAt = this.now();
+    this.firstReceivedAt ??= this.now();
+    const checkedAt = current ? current.checkedAt : new Date(this.now()).toISOString();
+    const previousPage = this.pages.get(payload.pageUrl);
+    if (previousPage && Date.parse(checkedAt) < previousPage.checkedAt) return;
     this.pages.set(payload.pageUrl, {
       result: current ? current.result : 'legacy',
       checkedAt: current ? Date.parse(current.checkedAt) : this.now(),
       receivedAt: this.now(),
       runId: current ? current.runId : null,
+      pendingDetails: current?.pendingDetails ?? 0,
+      diagnostic: {
+        view: payload.pageUrl === PAGE_URLS[0] ? 'posts' : 'replies',
+        extensionVersion: current?.diagnostics?.extensionVersion ?? null,
+        collectorRevision: current?.diagnostics?.collectorRevision ?? null,
+        reason: current?.diagnostics?.reason ?? 'old_collector',
+        samples: current?.diagnostics?.samples ?? 0,
+        result: current?.result ?? 'legacy', checkedAt,
+        receivedAt: new Date(this.now()).toISOString(),
+        postCount: current?.posts.length ?? 0, pendingDetails: current?.pendingDetails ?? 0,
+      },
     });
+    const pair = PAGE_URLS.map((url) => this.pages.get(url));
+    if (pair.every((page) => page && this.isFresh(page) && this.isComplete(page)) &&
+        pair[0]?.runId === pair[1]?.runId && pair[0]?.runId) {
+      this.lastCompleteAt = Math.min(...pair.map((page) => page!.checkedAt));
+    }
   }
 
   isConnected(): boolean {
     return this.collectionStatus().state === 'online';
   }
 
+  lastSuccessfulCollectionAt(): string | null {
+    return this.lastCompleteAt === null ? null : new Date(this.lastCompleteAt).toISOString();
+  }
+
+  diagnostics(): ChromePageDiagnostic[] {
+    return PAGE_URLS.flatMap(url => { const page = this.pages.get(url); return page ? [{ ...page.diagnostic }] : []; });
+  }
+
   collectionStatus(): ChromeCollectionStatus {
     if (!this.monitoringEnabled) return { state: 'disabled', errorCode: 'X_COLLECTION_DISABLED' };
     if (this.lastReceivedAt === null) return { state: 'needs_login', errorCode: 'X_COMPANION_WAITING' };
     const pages = PAGE_URLS.map((url) => this.pages.get(url));
+    if (pages.some(page => page && !this.isFresh(page))) {
+      return { state: 'stale', errorCode: 'X_COLLECTION_REPORT_STALE' };
+    }
     if (pages.some((page) => page?.result === 'needs_login')) {
       return { state: 'needs_login', errorCode: 'X_SESSION_EXPIRED' };
     }
     if (pages.some((page) => page?.result === 'legacy')) {
       return { state: 'stale', errorCode: 'X_COMPANION_LEGACY_NEEDS_REFRESH' };
     }
+    if (!this.hasCurrentCollector) return { state: 'partial', errorCode: 'X_COMPANION_COLLECTOR_NEEDS_REFRESH' };
     const failures = pages.map((page, index) => {
       const view = index === 0 ? 'POSTS' : 'REPLIES';
       if (!page) return `${view}_WAITING`;
-      if (this.now() - page.receivedAt > this.freshnessMs ||
-          this.now() - page.checkedAt > this.freshnessMs || page.checkedAt > this.now() + 60_000) return `${view}_STALE`;
-      return page.result === 'ready' ? null : `${view}_${page.result.toUpperCase()}`;
+      if (!this.isFresh(page)) return `${view}_STALE`;
+      return this.isComplete(page) ? null : `${view}_${page.result.toUpperCase()}`;
     }).filter(Boolean);
-    if (failures.length) return { state: 'stale', errorCode: `X_COLLECTION_${failures.join('_')}` };
-    if (pages[0]?.runId !== pages[1]?.runId) return { state: 'stale', errorCode: 'X_COLLECTION_PARTIAL_RUN' };
+    if (failures.length) {
+      const errorCode = `X_COLLECTION_${failures.join('_')}`;
+      if (failures.some((failure) => failure!.endsWith('_STALE'))) return { state: 'stale', errorCode };
+      if (failures.some((failure) => failure!.endsWith('_ERROR'))) return { state: 'error', errorCode };
+      // A live transport must not conceal a timeline that never finishes.
+      if (this.completionOverdue()) return { state: 'error', errorCode: `${errorCode}_INCOMPLETE` };
+      return { state: 'syncing', errorCode };
+    }
+    if (pages[0]?.runId !== pages[1]?.runId) {
+      return { state: this.completionOverdue() ? 'error' : 'syncing',
+        errorCode: this.completionOverdue() ? 'X_COLLECTION_PARTIAL_RUN_INCOMPLETE' :
+          this.lastCompleteAt !== null ? 'X_COLLECTION_SYNCING_PREVIOUS_OK' : 'X_COLLECTION_PARTIAL_RUN' };
+    }
+    if (pages.some((page) => page!.pendingDetails > 0)) {
+      return { state: 'partial', errorCode: 'X_COLLECTION_DETAILS_PENDING' };
+    }
     return { state: 'online', errorCode: null };
+  }
+
+  private isFresh(page: PageCollection): boolean {
+    return this.now() - page.receivedAt <= this.freshnessMs &&
+      this.now() - page.checkedAt <= this.freshnessMs && page.checkedAt <= this.now() + 60_000;
+  }
+
+  private isComplete(page: PageCollection): boolean {
+    return page.result === 'ready' || page.result === 'empty';
+  }
+
+  private completionOverdue(): boolean {
+    return this.now() - (this.lastCompleteAt ?? this.firstReceivedAt ?? this.now()) > this.freshnessMs;
   }
 
   setMonitoringEnabled(enabled: boolean): void {
@@ -150,7 +228,10 @@ export class ChromeCompanionStore {
     this.monitoringEnabled = enabled;
     this.pages.clear();
     this.lastReceivedAt = null;
+    this.firstReceivedAt = null;
+    this.lastCompleteAt = null;
     this.hasCurrentProtocol = false;
+    this.hasCurrentCollector = false;
   }
 
   readPosts(): MonitoredPost[] {
@@ -162,8 +243,11 @@ export class ChromeCompanionStore {
   clear(): void {
     this.posts.clear();
     this.lastReceivedAt = null;
+    this.firstReceivedAt = null;
+    this.lastCompleteAt = null;
     this.pages.clear();
     this.hasCurrentProtocol = false;
+    this.hasCurrentCollector = false;
   }
 }
 
@@ -288,6 +372,7 @@ export class ChromeCompanionBridge {
         collectionEnabled: this.collectionEnabled,
         generation: this.generation,
         protocolVersion: CHROME_COMPANION_PROTOCOL_VERSION,
+        collectorRevision: CHROME_COLLECTOR_REVISION,
       }));
       return;
     }

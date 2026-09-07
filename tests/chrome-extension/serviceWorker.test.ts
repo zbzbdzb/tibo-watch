@@ -6,7 +6,7 @@ interface WorkerModule {
   collectVisiblePosts(document: Document): Post[];
   findExpandablePostIds(document: Document): string[];
   captureTimeline(advance: boolean, expectedUrl: string | null, document: Document): Snapshot;
-  expandLongPosts(posts: Post[], ids: string[]): Promise<Post[]>;
+  expandLongPosts(posts: Post[], ids: string[], lease?: null, tab?: Tab): Promise<Post[]>;
   ensureMonitorTabs(force?: boolean): Promise<void>;
 }
 const POSTS_URL = 'https://x.com/thsottiaux';
@@ -104,7 +104,7 @@ describe('actual worker lifecycle in synthetic browser contexts', () => {
     await vi.runAllTimersAsync();
     await bootstrap;
     expect(fixture.submissions).toHaveLength(2);
-    expect(fixture.local[LAST_SCAN_KEY]).toMatchObject({ generation: fixture.generation, version: '0.2.13' });
+    expect(fixture.local[LAST_SCAN_KEY]).toMatchObject({ generation: fixture.generation, version: '0.2.16' });
   });
 
   test('ordinary worker wakes preserve the alarm deadline and do not rescan a recently completed generation', async () => {
@@ -211,17 +211,99 @@ describe('actual worker lifecycle in synthetic browser contexts', () => {
     expect(fixture.scrolled.get(20) ?? 0).toBe(0);
   });
 
-  test('leaves an active user view untouched and creates only its missing inactive monitor', async () => {
+  test('reuses an active user view without creating a third tab, reload or scroll', async () => {
     vi.useFakeTimers();
     const fixture = browserFixture([{ id: 10, url: POSTS_URL, active: true }, { id: 20, url: REPLIES_URL, active: false }]);
     const worker = await loadWorker();
     const run = worker.ensureMonitorTabs();
     await vi.runAllTimersAsync();
     await run;
-    expect(fixture.created.map((tab) => tab.url)).toEqual([POSTS_URL]);
+    expect(fixture.created).toEqual([]);
     expect(fixture.reloaded).toEqual([20]);
     expect(fixture.removed).toEqual([]);
-    expect(fixture.captures.has(10)).toBe(false);
+    expect(fixture.captures.has(10)).toBe(true);
+    expect(fixture.scrolled.get(10) ?? 0).toBe(0);
+  });
+
+  test('focus changes and lost ownership after restart do not multiply restored monitor tabs', async () => {
+    vi.useFakeTimers();
+    const fixture = browserFixture();
+    let worker = await loadWorker();
+    let run = worker.ensureMonitorTabs();
+    await vi.runAllTimersAsync(); await run;
+    fixture.tabs[0]!.active = true;
+    worker = await loadWorker();
+    run = worker.ensureMonitorTabs();
+    await vi.runAllTimersAsync(); await run;
+    delete fixture.session[OWNED_KEY];
+    delete fixture.session.tiboWatchSelectedTabsV1;
+    fixture.tabs[0]!.active = false; fixture.tabs[1]!.active = true;
+    worker = await loadWorker();
+    run = worker.ensureMonitorTabs();
+    await vi.runAllTimersAsync(); await run;
+    expect(fixture.created).toHaveLength(2);
+    expect(fixture.tabs).toHaveLength(2);
+    expect(fixture.removed).toEqual([]);
+    expect(fixture.submissions.every(value => value.result === 'ready')).toBe(true);
+  });
+
+  test('recognizes a stable repost after a pinned card while importing only the primary Tibo post', async () => {
+    vi.useFakeTimers();
+    const fixture = browserFixture();
+    fixture.html = () => article('100', 'Pinned.', '<div data-testid="socialContext">Pinned</div>') +
+      article('201', 'Reposted text.', '<div data-testid="socialContext">Tibo reposted</div>', 'someone');
+    const worker = await loadWorker(); const run = worker.ensureMonitorTabs();
+    await vi.runAllTimersAsync(); await run;
+    for (const submission of fixture.submissions) {
+      expect(submission.result).toBe('ready');
+      expect(submission.posts.map(post => post.id)).toEqual(['100']);
+      expect(submission.diagnostics).toMatchObject({ reason: 'stable_timeline', collectorRevision: 1, samples: 5 });
+    }
+  });
+
+  test('virtualized tail changes do not invalidate repeatedly readable leading posts', async () => {
+    vi.useFakeTimers();
+    const fixture = browserFixture();
+    fixture.html = (_url, attempt) => article('100', 'Current post.') + article(String(500 + attempt), 'Changing tail.');
+    const worker = await loadWorker(); const run = worker.ensureMonitorTabs();
+    await vi.runAllTimersAsync(); await run;
+    expect(fixture.submissions.every(value => value.result === 'ready')).toBe(true);
+  });
+
+  test('never navigates active views to expand text, reporting pending detail separately', async () => {
+    vi.useFakeTimers();
+    const fixture = browserFixture([{ id: 10, url: POSTS_URL, active: true }, { id: 20, url: REPLIES_URL, active: true }]);
+    fixture.html = () => article('308', 'Short body.', '<button>Show more</button>');
+    const worker = await loadWorker(); const run = worker.ensureMonitorTabs();
+    await vi.runAllTimersAsync(); await run;
+    expect(fixture.created).toEqual([]);
+    expect(fixture.tabs.map(tab => tab.url)).toEqual([POSTS_URL, REPLIES_URL]);
+    expect(fixture.submissions.map(value => [value.result, value.pendingDetails])).toEqual([['ready', 1], ['ready', 1]]);
+  });
+
+  test('a user focusing a temporary detail view pauses that slot instead of spawning a replacement', async () => {
+    vi.useFakeTimers();
+    const fixture = browserFixture();
+    fixture.html = url => article('308', url.includes('/status/') ? 'Full long text for the test.' : 'Short.',
+      url.includes('/status/') ? '' : '<button>Show more</button>');
+    fixture.afterUpdate = () => {
+      for (const tab of fixture.tabs) if (tab.url.includes('/status/')) tab.active = true;
+    };
+    let worker = await loadWorker(); let run = worker.ensureMonitorTabs();
+    await vi.runAllTimersAsync(); await run;
+    worker = await loadWorker(); run = worker.ensureMonitorTabs();
+    await vi.runAllTimersAsync(); await run;
+    expect(fixture.created).toHaveLength(2);
+    expect(fixture.submissions.slice(-2).find(value => value.view === 'posts')?.diagnostics?.reason).toBe('active_detail');
+    // The reply page uses the already expanded cached body, so it has no reason
+    // to navigate or pause merely because the posts slot is being viewed.
+    expect(fixture.submissions.slice(-2).find(value => value.view === 'replies')?.result).toBe('ready');
+    fixture.afterUpdate = () => undefined;
+    for (const tab of fixture.tabs) tab.active = false;
+    run = worker.ensureMonitorTabs(); await vi.runAllTimersAsync(); await run;
+    expect(fixture.created).toHaveLength(2);
+    expect(fixture.tabs.map(tab => tab.url)).toEqual([POSTS_URL, REPLIES_URL]);
+    expect(fixture.submissions.slice(-2).every(value => value.result === 'ready')).toBe(true);
   });
 
   test('reports a failed reload per page and still collects the available other page', async () => {
@@ -296,9 +378,10 @@ describe('actual worker lifecycle in synthetic browser contexts', () => {
     expect([...fixture.captures.values()]).toEqual([1]);
   });
 
-  test('expands a long primary post in an owned detail tab, closes it, and persists full text across restart', async () => {
+  test('expands within the existing inactive tab, restores it and caches text across restart', async () => {
     vi.useFakeTimers();
-    const fixture = browserFixture();
+    const monitorTab = { id: 10, url: POSTS_URL, active: false };
+    const fixture = browserFixture([monitorTab]);
     const truncated = 'Update on rate limits...';
     const fullText = 'Update on rate limits. Tomorrow we will do a full reset of usage for all paid subscriptions.';
     fixture.local.tiboWatchExpandedPostsV1 = { 308: { text: 'Old unverified foreign text claiming a reset.' } };
@@ -307,28 +390,43 @@ describe('actual worker lifecycle in synthetic browser contexts', () => {
     let worker = await loadWorker();
     const dom = new JSDOM(article('308', truncated, '<button>Show more</button>'));
     const posts = worker.collectVisiblePosts(dom.window.document);
-    expect(await worker.expandLongPosts(posts, ['308'])).toEqual([expect.objectContaining({ text: fullText })]);
-    expect(fixture.created).toHaveLength(1);
-    expect(fixture.removed).toEqual([101]);
+    expect(await worker.expandLongPosts(posts, ['308'], null, { ...monitorTab })).toEqual([expect.objectContaining({ text: fullText })]);
+    expect(fixture.created).toHaveLength(0);
+    expect(fixture.removed).toEqual([]);
+    expect(fixture.tabs[0]?.url).toBe(POSTS_URL);
     worker = await loadWorker();
     expect(await worker.expandLongPosts(posts, ['308'])).toEqual([expect.objectContaining({ text: fullText })]);
-    expect(fixture.created).toHaveLength(1);
+    expect(fixture.created).toHaveLength(0);
     fixture.enabled = false;
     await expect(worker.expandLongPosts(posts, ['308'])).rejects.toThrow();
-    expect(fixture.created).toHaveLength(1);
+    expect(fixture.created).toHaveLength(0);
   });
 
-  test('cancels detail expansion on a changed generation and closes its temporary owned tab', async () => {
-    const fixture = browserFixture();
-    fixture.afterCreate = () => { fixture.generation += 1; };
+  test('cancels detail expansion on a changed generation and restores the monitor URL', async () => {
+    const monitorTab = { id: 10, url: POSTS_URL, active: false };
+    const fixture = browserFixture([monitorTab]);
+    fixture.afterUpdate = () => { fixture.generation += 1; };
     const worker = await loadWorker();
     const posts = worker.collectVisiblePosts(new JSDOM(article('308', 'Update...', '<button>Show more</button>')).window.document);
-    await expect(worker.expandLongPosts(posts, ['308'])).rejects.toThrow();
-    expect(fixture.removed).toEqual([101]);
+    await expect(worker.expandLongPosts(posts, ['308'], null, { ...monitorTab })).rejects.toThrow();
+    expect(fixture.created).toEqual([]);
+    expect(fixture.tabs[0]?.url).toBe(POSTS_URL);
     expect(fixture.captures.size).toBe(0);
   });
 
-  test('bounds failed detail expansion and marks incomplete primary text as loading', async () => {
+  test('a footer spinner does not keep stable non-pinned posts permanently loading', async () => {
+    vi.useFakeTimers();
+    const fixture = browserFixture();
+    fixture.html = () => article('308', 'A readable update.') + '<div role="progressbar"></div>';
+    const worker = await loadWorker();
+    const run = worker.ensureMonitorTabs();
+    await vi.runAllTimersAsync();
+    await run;
+    expect(fixture.submissions.map((value) => value.result)).toEqual(['ready', 'ready']);
+    expect([...fixture.captures.values()]).toEqual([5, 5]);
+  });
+
+  test('bounds failed detail expansion without mislabeling a ready timeline as loading', async () => {
     vi.useFakeTimers();
     const fixture = browserFixture();
     fixture.html = () => article('308', 'Update on rate limits...', '<button>Show more</button>');
@@ -336,15 +434,16 @@ describe('actual worker lifecycle in synthetic browser contexts', () => {
     const run = worker.ensureMonitorTabs();
     await vi.runAllTimersAsync();
     await run;
-    expect(fixture.submissions.map((value) => value.result)).toEqual(['loading', 'loading']);
-    expect(fixture.created.filter((tab) => tab.url.includes('/status/'))).toHaveLength(2);
-    expect(fixture.removed).toHaveLength(2);
-    expect([...fixture.captures.values()].every((count) => count <= 10)).toBe(true);
+    expect(fixture.submissions.map((value) => value.result)).toEqual(['ready', 'ready']);
+    expect(fixture.submissions.map((value) => value.pendingDetails)).toEqual([1, 1]);
+    expect(fixture.created.filter((tab) => tab.url.includes('/status/'))).toHaveLength(0);
+    expect(fixture.removed).toHaveLength(0);
+    expect([...fixture.captures.values()].every((count) => count <= 15)).toBe(true);
   });
 });
 
 interface Tab { id: number; url: string; active?: boolean }
-interface Submission { protocolVersion: number; generation: number; runId: string; pageUrl: string; view: string; checkedAt: string; result: string; posts: Post[] }
+interface Submission { protocolVersion: number; generation: number; runId: string; pageUrl: string; view: string; checkedAt: string; result: string; posts: Post[]; pendingDetails: number; diagnostics?: { reason: string; collectorRevision: number; samples: number } }
 
 function browserFixture(initialTabs: Tab[] = []) {
   const fixture = {
@@ -360,15 +459,15 @@ function browserFixture(initialTabs: Tab[] = []) {
       void _name;
     }),
     session: {} as Record<string, unknown>,
-    local: { [LAST_SCAN_KEY]: { generation: 100, version: '0.2.13', completedAt: Date.now() } } as Record<string, unknown>,
+    local: { [LAST_SCAN_KEY]: { generation: 100, version: '0.2.16', completedAt: Date.now() } } as Record<string, unknown>,
     submissions: [] as Submission[], requests: [] as RequestInit[],
     html: ((_url: string, _attempt: number) => { void _url; void _attempt; return article(); }),
-    afterCapture: () => undefined as void, afterCreate: () => undefined as void,
+    afterCapture: () => undefined as void, afterCreate: () => undefined as void, afterUpdate: () => undefined as void,
     query: vi.fn(async () => fixture.tabs),
     fetcher: vi.fn(async (url: string, init: RequestInit) => {
       fixture.requests.push(init);
       if (fixture.offline) throw new Error('Desktop unavailable');
-      if (url.endsWith('/health')) return Response.json({ ok: true, collectionEnabled: fixture.enabled, generation: fixture.generation, protocolVersion: 2 });
+      if (url.endsWith('/health')) return Response.json({ ok: true, collectionEnabled: fixture.enabled, generation: fixture.generation, protocolVersion: 2, collectorRevision: 1 });
       if (!url.endsWith('/posts')) throw new Error('Unexpected network request');
       fixture.submissions.push(JSON.parse(String(init.body)) as Submission);
       return new Response(null, { status: 204 });
@@ -380,7 +479,7 @@ function browserFixture(initialTabs: Tab[] = []) {
   });
   vi.stubGlobal('fetch', fixture.fetcher);
   vi.stubGlobal('chrome', {
-    runtime: { id: 'cnhojdncaimngpikaokmgpnihhglnmkn', getManifest: () => ({ version: '0.2.13' }),
+    runtime: { id: 'cnhojdncaimngpikaokmgpnihhglnmkn', getManifest: () => ({ version: '0.2.16' }),
       onInstalled: { addListener: (listener: (details: { reason: string }) => void) => fixture.installed.push(listener) },
       onStartup: { addListener: (listener: () => void) => fixture.startup.push(listener) } },
     alarms: { get: async () => fixture.alarmRecord, create: fixture.alarmCreate,
@@ -388,6 +487,16 @@ function browserFixture(initialTabs: Tab[] = []) {
     storage: { session: storage(fixture.session), local: storage(fixture.local) },
     tabs: {
       query: fixture.query,
+      get: async (id: number) => {
+        const tab = fixture.tabs.find(tab => tab.id === id);
+        if (!tab) throw new Error('Missing tab');
+        return { ...tab };
+      },
+      update: async (id: number, update: { url: string }) => {
+        const tab = fixture.tabs.find(tab => tab.id === id);
+        if (!tab) throw new Error('Missing tab');
+        Object.assign(tab, update); fixture.afterUpdate(); return { ...tab };
+      },
       create: async ({ url }: { url: string }) => {
         const tab = { id: 101 + fixture.created.length, url };
         fixture.tabs.push(tab); fixture.created.push(tab); fixture.afterCreate(); return tab;

@@ -15,11 +15,96 @@ function payload(view: 'posts' | 'replies', now: number, result: 'ready' | 'empt
     protocolVersion: 2, generation: 1, runId, view,
     pageUrl: view === 'posts' ? 'https://x.com/thsottiaux' : 'https://x.com/thsottiaux/with_replies',
     checkedAt: new Date(now).toISOString(), result,
+    diagnostics: { extensionVersion: '0.2.16', collectorRevision: 1, reason: 'stable_timeline', samples: 5 },
     posts: result === 'ready' ? [{ ...basePost, sourceIds: ['x-browser'] }] : [],
   };
 }
 
 describe('Chrome companion session collection truth', () => {
+  test('reports an old live collector explicitly and ignores its late reports after upgrade', () => {
+    const now = Date.now();
+    const store = new ChromeCompanionStore({ now: () => now });
+    const old = payload('posts', now, 'loading');
+    if ('diagnostics' in old) delete old.diagnostics;
+    store.ingest(old);
+    expect(store.collectionStatus()).toEqual({ state: 'partial', errorCode: 'X_COMPANION_COLLECTOR_NEEDS_REFRESH' });
+    expect(store.diagnostics()[0]?.extensionVersion).toBeNull();
+    store.ingest(payload('posts', now)); store.ingest(payload('replies', now));
+    store.ingest(old);
+    expect(store.collectionStatus().state).toBe('online');
+    expect(store.diagnostics().map(page => page.extensionVersion)).toEqual(['0.2.16', '0.2.16']);
+  });
+
+  test('fresh incomplete reports mean collection incomplete; loss of reports means data timeout', () => {
+    let now = Date.now();
+    const store = new ChromeCompanionStore({ now: () => now });
+    store.ingest(payload('posts', now, 'loading')); store.ingest(payload('replies', now));
+    now += 600_001;
+    store.ingest(payload('posts', now, 'loading')); store.ingest(payload('replies', now));
+    expect(store.collectionStatus()).toMatchObject({ state: 'error', errorCode: 'X_COLLECTION_POSTS_LOADING_INCOMPLETE' });
+    now += 600_001;
+    expect(store.collectionStatus()).toEqual({ state: 'stale', errorCode: 'X_COLLECTION_REPORT_STALE' });
+  });
+
+  test('keeps a successful pair through normal refresh, but never indefinitely', () => {
+    let now = Date.now();
+    const store = new ChromeCompanionStore({ now: () => now });
+    store.ingest(payload('posts', now));
+    store.ingest(payload('replies', now));
+    const successAt = store.lastSuccessfulCollectionAt();
+    now += 300_000;
+    const nextRun = '4d658550-55cb-4731-96af-4cf6657b599a';
+    store.ingest({ ...payload('posts', now), runId: nextRun });
+    expect(store.collectionStatus()).toEqual({ state: 'syncing', errorCode: 'X_COLLECTION_SYNCING_PREVIOUS_OK' });
+    expect(store.lastSuccessfulCollectionAt()).toBe(successAt);
+    store.ingest({ ...payload('replies', now), runId: nextRun });
+    expect(store.collectionStatus().state).toBe('online');
+    now += 600_001;
+    expect(store.collectionStatus().state).toBe('stale');
+  });
+
+  test('repeated loading reports cannot keep incomplete collection fresh forever', () => {
+    let now = Date.now();
+    const store = new ChromeCompanionStore({ now: () => now });
+    store.ingest(payload('posts', now, 'loading'));
+    store.ingest(payload('replies', now, 'loading'));
+    expect(store.collectionStatus().state).toBe('syncing');
+    now += 600_001;
+    store.ingest(payload('posts', now, 'loading'));
+    store.ingest(payload('replies', now, 'loading'));
+    expect(store.collectionStatus()).toEqual({ state: 'error', errorCode: 'X_COLLECTION_POSTS_LOADING_REPLIES_LOADING_INCOMPLETE' });
+    store.ingest(payload('posts', now));
+    store.ingest(payload('replies', now));
+    expect(store.collectionStatus().state).toBe('online');
+  });
+
+  test('separates pending long text from fresh timelines and still detects login, failure and timeout', () => {
+    let now = Date.now();
+    const store = new ChromeCompanionStore({ now: () => now });
+    store.ingest({ ...payload('posts', now), pendingDetails: 2 });
+    store.ingest(payload('replies', now));
+    expect(store.collectionStatus()).toEqual({ state: 'partial', errorCode: 'X_COLLECTION_DETAILS_PENDING' });
+    store.ingest(payload('replies', now, 'needs_login'));
+    expect(store.collectionStatus().state).toBe('needs_login');
+    store.ingest(payload('replies', now, 'error'));
+    expect(store.collectionStatus().state).toBe('error');
+    store.ingest(payload('replies', now));
+    now += 600_001;
+    expect(store.collectionStatus().state).toBe('stale');
+    store.ingest(payload('posts', now));
+    store.ingest(payload('replies', now));
+    expect(store.collectionStatus().state).toBe('online');
+  });
+
+  test('an explicitly empty timeline is successful without resurrecting cached posts as new', () => {
+    const now = Date.now();
+    const store = new ChromeCompanionStore({ now: () => now });
+    store.ingest(payload('posts', now, 'empty'));
+    store.ingest(payload('replies', now, 'empty'));
+    expect(store.collectionStatus().state).toBe('online');
+    expect(store.readPosts()).toEqual([]);
+  });
+
   test('requires fresh success from both pages in the same run', async () => {
     let now = Date.parse('2026-09-05T00:00:00Z');
     const store = new ChromeCompanionStore({ now: () => now, freshnessMs: 600_000 });
@@ -32,10 +117,10 @@ describe('Chrome companion session collection truth', () => {
     now += 600_001;
     store.ingest({ ...payload('posts', now), runId: '4d658550-55cb-4731-96af-4cf6657b599a' });
     expect(await session.isLoggedIn()).toBe(false);
-    expect(store.collectionStatus().errorCode).toContain('REPLIES_STALE');
+    expect(store.collectionStatus().errorCode).toContain('REPORT_STALE');
   });
 
-  test.each(['empty', 'loading', 'error'] as const)('does not make old cached posts healthy after a %s batch', (result) => {
+  test.each(['loading', 'error'] as const)('distinguishes in-progress from failed collection after a %s batch', (result) => {
     const now = Date.parse('2026-09-05T00:00:00Z');
     const store = new ChromeCompanionStore({ now: () => now });
     store.ingest(payload('posts', now));
@@ -43,7 +128,7 @@ describe('Chrome companion session collection truth', () => {
     expect(store.isConnected()).toBe(true);
     store.ingest(payload('posts', now, result));
     expect(store.isConnected()).toBe(false);
-    expect(store.collectionStatus()).toEqual({ state: 'stale', errorCode: `X_COLLECTION_POSTS_${result.toUpperCase()}` });
+    expect(store.collectionStatus()).toEqual({ state: result === 'loading' ? 'syncing' : 'error', errorCode: `X_COLLECTION_POSTS_${result.toUpperCase()}` });
     expect(store.readPosts()).toHaveLength(1);
   });
 
@@ -104,7 +189,7 @@ describe('Chrome companion session collection truth', () => {
     store.ingest(payload('posts', now));
     store.ingest(payload('replies', now));
     store.ingest({ ...payload('posts', now), runId: '4d658550-55cb-4731-96af-4cf6657b599a' });
-    expect(store.collectionStatus()).toEqual({ state: 'stale', errorCode: 'X_COLLECTION_PARTIAL_RUN' });
+    expect(store.collectionStatus()).toEqual({ state: 'syncing', errorCode: 'X_COLLECTION_SYNCING_PREVIOUS_OK' });
   });
 
   test('merges longest body and richest quote independently and commutatively', () => {
@@ -137,7 +222,7 @@ describe('Chrome companion session collection truth', () => {
     store.ingest({ pageUrl: 'https://x.com/thsottiaux/with_replies', posts: [] });
     expect(store.collectionStatus().errorCode).toBe('X_COMPANION_LEGACY_NEEDS_REFRESH');
     store.ingest(payload('posts', now, 'error'));
-    expect(store.collectionStatus()).toEqual({ state: 'stale', errorCode: 'X_COLLECTION_POSTS_ERROR_REPLIES_WAITING' });
+    expect(store.collectionStatus()).toEqual({ state: 'error', errorCode: 'X_COLLECTION_POSTS_ERROR_REPLIES_WAITING' });
   });
 
   test('a delayed legacy request cannot undo a verified current-protocol reload', () => {

@@ -48,6 +48,19 @@ const classifier: Classifier = {
 };
 
 describe('MonitorCoordinator', () => {
+  it('silently completes baseline for ready timelines with pending long text', async () => {
+    const database = new AppDatabase(':memory:');
+    try {
+      const browser = source('x-browser', [post('300')]);
+      browser.check = vi.fn(async ({ checkedAt }) => ({ sourceId: 'x-browser', checkedAt,
+        state: 'partial', posts: [post('300')], latencyMs: 0, errorCode: 'X_COLLECTION_DETAILS_PENDING' }));
+      const onSignal = vi.fn();
+      const coordinator = new MonitorCoordinator({ database, sources: [browser], classifier, onSignal });
+      await coordinator.checkNow('2026-07-31T05:00:00.000Z');
+      expect(database.getSettings().baselineComplete).toBe(true);
+      expect(onSignal).not.toHaveBeenCalled();
+    } finally { database.close(); }
+  });
   it('runs sources concurrently, merges duplicate evidence, and establishes a silent baseline', async () => {
     const database = new AppDatabase(':memory:');
     const first = post('300');

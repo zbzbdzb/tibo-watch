@@ -1,13 +1,16 @@
-/* global chrome, document, fetch, setTimeout, AbortSignal */
+/* global chrome, document, fetch, setTimeout, AbortSignal, URL */
 
 const BRIDGE_BASE_URL = 'http://127.0.0.1:47652';
 const MONITOR_URLS = ['https://x.com/thsottiaux', 'https://x.com/thsottiaux/with_replies'];
 const PROTOCOL_VERSION = 2;
+const COLLECTOR_REVISION = 1;
 const COLLECTION_ATTEMPTS = 10;
 const COLLECTION_RETRY_MS = 1_000;
 // V1 cached results were produced before primary-author verification was fixed.
 const EXPANDED_POST_CACHE_KEY = 'tiboWatchExpandedPostsV2';
 const OWNED_TABS_KEY = 'tiboWatchOwnedTabsV1';
+const SELECTED_TABS_KEY = 'tiboWatchSelectedTabsV1';
+const DETAIL_RETURN_KEY = 'tiboWatchDetailReturnV1';
 const LAST_SCAN_KEY = 'tiboWatchLastCompletedScanV2';
 const SCAN_INTERVAL_MS = 5 * 60_000;
 let monitorCheckInFlight = null;
@@ -21,17 +24,24 @@ export function captureTimeline(advance = false, expectedUrl = null, root = docu
   const articleSelector = 'article[data-testid="tweet"]';
   const posts = [];
   const expandableIds = [];
+  const timelineKeys = [];
   let hasUnpinned = false;
   for (const article of root.querySelectorAll(articleSelector)) {
     if (article.parentElement?.closest(articleSelector)) continue;
     const isPrimary = (node) => node.closest(articleSelector) === article && !node.closest(quoteSelector);
     const socialContext = clean([...article.querySelectorAll('[data-testid="socialContext"]')].find(isPrimary));
-    if (/repost|转发|轉發/i.test(socialContext)) continue;
     // Never search for a Tibo link anywhere in the article. First resolve the
     // primary timestamp/author; the quoted author is not the primary author.
     const permalink = [...article.querySelectorAll('a[href*="/status/"]')]
       .find((link) => isPrimary(link) && link.querySelector('time'));
     const match = permalink?.getAttribute('href')?.match(/\/([^/]+)\/status\/(\d+)/i);
+    const repost = /repost|转发|轉發/i.test(socialContext);
+    if (match && !/pinned|置顶|釘選/i.test(socialContext) && (repost || match[1]?.toLowerCase() === 'thsottiaux')) {
+      timelineKeys.push(match[2]);
+    }
+    // A skipped repost still proves the timeline progressed beyond its pinned
+    // card. Readiness must not depend on which cards are imported as signals.
+    if (repost) continue;
     if (!match || match[1]?.toLowerCase() !== 'thsottiaux' || !match[2]) continue;
     const author = [...article.querySelectorAll('[data-testid="User-Name"]')].find(isPrimary);
     const authorHandle = author?.textContent?.match(/@([a-zA-Z0-9_]+)/)?.[1]?.toLowerCase();
@@ -69,13 +79,17 @@ export function captureTimeline(advance = false, expectedUrl = null, root = docu
     /hasn[’']t posted|has not posted|No posts yet|还没有发布|尚未發布/i.test(bodyText);
   let result = needsLogin ? 'needs_login' : hasError ? 'error' : loading ? 'loading' :
     posts.length ? 'ready' : explicitEmpty ? 'empty' : 'loading';
-  if (expectedUrl && url.split(/[?#]/)[0].replace(/\/$/, '') !== expectedUrl) {
+  const wrongPage = expectedUrl && url.split(/[?#]/)[0].replace(/\/$/, '') !== expectedUrl;
+  if (wrongPage) {
     result = needsLogin ? 'needs_login' : 'error';
   }
   if (advance && !needsLogin && !hasError) {
     root.defaultView?.scrollBy(0, Math.min(root.defaultView.innerHeight || 800, 900));
   }
-  return { posts, expandableIds, result, hasUnpinned, loading };
+  const reason = needsLogin ? 'login_required' : wrongPage ? 'navigation_changed' : hasError ? 'page_error' :
+    explicitEmpty ? 'empty_timeline' : posts.length && !timelineKeys.length ? 'pinned_only' :
+      timelineKeys.length ? 'unstable_timeline' : 'page_loading';
+  return { posts, expandableIds, result, hasUnpinned, loading, timelineKeys, reason };
 }
 
 export function collectVisiblePosts(root = document) {
@@ -110,7 +124,8 @@ export async function isDesktopAppAvailable() {
 async function newLease() {
   const value = await health();
   if (!value) throw new Error('Collection is disabled or the desktop app is unavailable');
-  return { generation: value.generation, runId: globalThis.crypto.randomUUID(), detailBudget: 3 };
+  return { generation: value.generation, runId: globalThis.crypto.randomUUID(), detailBudget: 3,
+    diagnosticsSupported: value.collectorRevision === COLLECTOR_REVISION };
 }
 
 async function requireLease(lease) {
@@ -122,8 +137,9 @@ const retry = () => new Promise((resolve) => setTimeout(resolve, COLLECTION_RETR
 
 async function inspect(tabId, expectedUrl, advance, lease) {
   await requireLease(lease);
+  const tab = await chrome.tabs.get(tabId);
   const [{ result } = {}] = await chrome.scripting.executeScript({
-    target: { tabId }, func: captureTimeline, args: [advance, expectedUrl],
+    target: { tabId }, func: captureTimeline, args: [advance && !tab.active, expectedUrl],
   });
   await requireLease(lease);
   if (!result || !Array.isArray(result.posts)) throw new Error('Timeline was not readable');
@@ -133,9 +149,11 @@ async function inspect(tabId, expectedUrl, advance, lease) {
 async function submitTab(tab, owned, lease) {
   const collected = new Map();
   const expandable = new Set();
-  let previousSignature = '';
+  let previousKeys = [];
   let stableSamples = 0;
   let result = 'loading';
+  let reason = 'page_loading';
+  let samples = 0;
   for (let attempt = 0; attempt < COLLECTION_ATTEMPTS; attempt += 1) {
     let snapshot;
     try {
@@ -144,29 +162,40 @@ async function submitTab(tab, owned, lease) {
       // Distinguish transient navigation from revoked collection before retrying.
       await requireLease(lease);
       result = 'error';
+      reason = 'read_failed';
       if (attempt < COLLECTION_ATTEMPTS - 1) await retry();
       continue;
     }
-    for (const post of snapshot.posts) collected.set(post.id, post);
+    samples += 1;
+    for (const post of snapshot.posts) {
+      if (!collected.has(post.id) || collected.get(post.id).text.length < post.text.length) collected.set(post.id, post);
+    }
     for (const id of snapshot.expandableIds ?? []) expandable.add(id);
-    const signature = snapshot.posts.map((post) => `${post.id}:${post.text}`).sort().join('|');
-    stableSamples = signature && signature === previousSignature ? stableSamples + 1 : 0;
-    previousSignature = signature;
+    const keys = snapshot.timelineKeys ?? [];
+    stableSamples = keys.some(key => previousKeys.includes(key)) ? stableSamples + 1 : 0;
+    previousKeys = keys;
     result = snapshot.result;
+    reason = snapshot.reason;
     if (result === 'needs_login' || result === 'error') break;
     // A pinned item often renders before the current timeline. Wait through several
     // samples and bounded scrolls, and never call a pinned-only page successful.
-    if (attempt >= 4 && stableSamples >= 2 && result === 'ready' && snapshot.hasUnpinned && !snapshot.loading) break;
+    // X may leave a spinner at the infinite-scroll footer. Stable, verified
+    // non-pinned posts prove the visible timeline is readable despite that spinner.
+    if (attempt >= 4 && stableSamples >= 2 && keys.length) {
+      result = collected.size ? 'ready' : 'empty';
+      reason = 'stable_timeline';
+      break;
+    }
     if (result === 'ready') result = 'loading';
     if (attempt < COLLECTION_ATTEMPTS - 1) await retry();
   }
-  const posts = await expandLongPosts([...collected.values()].slice(0, 100), [...expandable], lease);
-  if (result === 'ready' && posts.some((post) => expandable.has(post.id) &&
-      post.text.length <= (collected.get(post.id)?.text.length ?? 0))) result = 'loading';
-  await submitResult(tab.url, result, posts, lease);
+  const posts = await expandLongPosts([...collected.values()].slice(0, 100), [...expandable], lease, tab);
+  const pendingDetails = posts.filter((post) => expandable.has(post.id) &&
+    post.text.length <= (collected.get(post.id)?.text.length ?? 0)).length;
+  await submitResult(tab.url, result, posts, lease, pendingDetails, reason, samples);
 }
 
-async function submitResult(pageUrl, result, posts, lease) {
+async function submitResult(pageUrl, result, posts, lease, pendingDetails = 0, reason = 'read_failed', samples = 0) {
   await requireLease(lease);
   const response = await fetch(`${BRIDGE_BASE_URL}/posts`, {
     method: 'POST', credentials: 'omit', signal: AbortSignal.timeout(2_500),
@@ -174,13 +203,16 @@ async function submitResult(pageUrl, result, posts, lease) {
     body: JSON.stringify({
       protocolVersion: PROTOCOL_VERSION, generation: lease.generation, runId: lease.runId,
       pageUrl, view: pageUrl === MONITOR_URLS[0] ? 'posts' : 'replies',
-      checkedAt: new Date().toISOString(), result, posts,
+      checkedAt: new Date().toISOString(), result, posts, pendingDetails,
+      ...(lease.diagnosticsSupported ? { diagnostics: {
+        extensionVersion: chrome.runtime.getManifest().version, collectorRevision: COLLECTOR_REVISION, reason, samples,
+      } } : {}),
     }),
   });
   if (!response.ok) throw new Error('The desktop app rejected collection');
 }
 
-export async function expandLongPosts(posts, expandableIds, existingLease = null) {
+export async function expandLongPosts(posts, expandableIds, existingLease = null, monitorTab = null) {
   const lease = existingLease ?? await newLease();
   await requireLease(lease);
   const expandable = new Set(expandableIds);
@@ -193,9 +225,8 @@ export async function expandLongPosts(posts, expandableIds, existingLease = null
     if (expandable.has(post.id) && cached?.id === post.id && cached.authorHandle === 'thsottiaux' &&
         cached.url === post.url && cached.text?.length > post.text.length) {
       expandedPosts.push({ ...post, text: cached.text, quotedText: cached.quotedText });
-    } else if (expandable.has(post.id) && lease.detailBudget > 0) {
-      lease.detailBudget -= 1;
-      const expanded = await readPostFromDetailTab(post, lease);
+    } else if (expandable.has(post.id) && lease.detailBudget > 0 && monitorTab) {
+      const expanded = await readPostFromDetailTab(post, lease, monitorTab);
       expandedPosts.push(expanded ?? post);
       if (expanded) { cache[post.id] = expanded; cacheChanged = true; }
     } else expandedPosts.push(post);
@@ -235,26 +266,49 @@ async function forgetOwned(id) {
   await writeStorage(chrome.storage?.session, OWNED_TABS_KEY, owned);
 }
 
-async function readPostFromDetailTab(post, lease) {
+async function restoreDetailTab(id, entry) {
+  const current = await chrome.tabs.get(Number(id)).catch(() => null);
+  if (current?.active && current.url === entry.detailUrl) return false;
+  if (current?.url === entry.detailUrl) await chrome.tabs.update(Number(id), { url: entry.returnUrl });
+  const pending = await readStorage(chrome.storage?.session, DETAIL_RETURN_KEY);
+  delete pending[id];
+  await writeStorage(chrome.storage?.session, DETAIL_RETURN_KEY, pending);
+  return true;
+}
+
+async function readPostFromDetailTab(post, lease, monitorTab) {
   await requireLease(lease);
-  const detailTab = await chrome.tabs.create({ url: post.url, active: false });
-  if (!detailTab?.id) return null;
-  await rememberOwned({ id: detailTab.id, url: post.url });
+  const current = await chrome.tabs.get(monitorTab.id).catch(() => null);
+  if (!current || current.active || canonicalMonitorUrl(current.url) !== monitorTab.url) return null;
+  lease.detailBudget -= 1;
+  const entry = { returnUrl: current.url, detailUrl: post.url };
+  const pending = await readStorage(chrome.storage?.session, DETAIL_RETURN_KEY);
+  pending[monitorTab.id] = entry;
+  await writeStorage(chrome.storage?.session, DETAIL_RETURN_KEY, pending);
   try {
+    await requireLease(lease);
+    await chrome.tabs.update(monitorTab.id, { url: post.url });
     for (let attempt = 0; attempt < COLLECTION_ATTEMPTS; attempt += 1) {
       try {
-        const snapshot = await inspect(detailTab.id, post.url, false, lease);
+        const snapshot = await inspect(monitorTab.id, post.url, false, lease);
         const expanded = snapshot.posts.find((candidate) => candidate.id === post.id);
         if (expanded && expanded.text.length > post.text.length && !snapshot.expandableIds.includes(post.id)) return expanded;
-        if (snapshot.result === 'needs_login' || snapshot.result === 'error') return null;
+        if (snapshot.result === 'needs_login' || (snapshot.result === 'error' && snapshot.reason !== 'navigation_changed')) return null;
       } catch { await requireLease(lease); }
       if (attempt < COLLECTION_ATTEMPTS - 1) await retry();
     }
     return null;
   } finally {
-    await chrome.tabs.remove(detailTab.id).catch(() => undefined);
-    await forgetOwned(detailTab.id);
+    await restoreDetailTab(monitorTab.id, entry).catch(() => undefined);
   }
+}
+
+function canonicalMonitorUrl(value) {
+  try {
+    const url = new URL(value);
+    const canonical = `${url.origin}${url.pathname.replace(/\/$/, '')}`;
+    return MONITOR_URLS.includes(canonical) ? canonical : null;
+  } catch { return null; }
 }
 
 export function ensureMonitorTabs(force = true) {
@@ -290,9 +344,18 @@ async function runMonitorCheck() {
   // Session storage survives worker suspension but not browser restarts, where
   // Chrome may recycle tab IDs. Never infer ownership just from a matching URL.
   const owned = await readStorage(chrome.storage?.session, OWNED_TABS_KEY);
+  const selectedTabs = await readStorage(chrome.storage?.session, SELECTED_TABS_KEY);
+  const pendingDetails = await readStorage(chrome.storage?.session, DETAIL_RETURN_KEY);
+  for (const [id, entry] of Object.entries(pendingDetails)) {
+    if (!canonicalMonitorUrl(entry.returnUrl) || !/^https:\/\/x\.com\/thsottiaux\/status\/\d+$/.test(entry.detailUrl)) continue;
+    await requireLease(lease);
+    await restoreDetailTab(id, entry).catch(() => undefined);
+  }
   for (const tab of tabs) {
     if (tab.id && owned[tab.id] === tab.url && /^https:\/\/x\.com\/thsottiaux\/status\/\d+$/.test(tab.url ?? '')) {
       await requireLease(lease);
+      const current = await chrome.tabs.get(tab.id).catch(() => null);
+      if (!current || current.active || current.url !== owned[tab.id]) continue;
       await chrome.tabs.remove(tab.id).catch(() => undefined);
       await forgetOwned(tab.id);
     }
@@ -300,13 +363,21 @@ async function runMonitorCheck() {
   for (const url of MONITOR_URLS) {
     try {
       await requireLease(lease);
-      // Refresh matching inactive pages before capture, including reused user
-      // tabs. An active user view is left untouched; use an inactive owned tab.
-      const matches = tabs.filter((tab) => tab.id && tab.url === url && !tab.active);
+      // Focus is not ownership. Reuse the selected view even when the user is
+      // looking at it; active views are read-only, never replaced by a new tab.
+      tabs = await chrome.tabs.query({});
+      const pending = await readStorage(chrome.storage?.session, DETAIL_RETURN_KEY);
+      if (tabs.some(tab => tab.id === selectedTabs[url] && tab.active && pending[tab.id]?.detailUrl === tab.url)) {
+        await submitResult(url, 'loading', [], lease, 0, 'active_detail');
+        continue;
+      }
+      const matches = tabs.filter((tab) => tab.id && canonicalMonitorUrl(tab.url) === url);
       const ownedMatches = matches.filter((tab) => owned[tab.id] === url);
-      let selected = ownedMatches[0] ?? matches[0];
-      for (const duplicate of ownedMatches.slice(1)) {
+      let selected = matches.find(tab => tab.id === selectedTabs[url]) ?? ownedMatches[0] ?? matches[0];
+      for (const duplicate of ownedMatches.filter(tab => tab.id !== selected?.id)) {
         await requireLease(lease);
+        const current = await chrome.tabs.get(duplicate.id).catch(() => null);
+        if (!current || current.active || current.url !== owned[duplicate.id]) continue;
         await chrome.tabs.remove(duplicate.id).catch(() => undefined);
         await forgetOwned(duplicate.id);
       }
@@ -320,8 +391,12 @@ async function runMonitorCheck() {
         await rememberOwned(selected);
       } else {
         await requireLease(lease);
-        await chrome.tabs.reload(selected.id);
+        const current = await chrome.tabs.get(selected.id);
+        if (canonicalMonitorUrl(current.url) !== url) throw new Error('User navigated away');
+        if (!current.active) await chrome.tabs.reload(selected.id);
       }
+      selectedTabs[url] = selected.id;
+      await writeStorage(chrome.storage?.session, SELECTED_TABS_KEY, selectedTabs);
       await submitTab({ id: selected.id, url }, isOwned, lease);
     } catch {
       await requireLease(lease);

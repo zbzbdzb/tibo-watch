@@ -1,6 +1,6 @@
 {
   "name": "tibo-watch",
-  "version": "0.2.14",
+  "version": "0.2.16",
   "private": true,
   "description": "Windows desktop monitor for Tibo's Codex reset announcements",
   "main": "dist/main/main.js",

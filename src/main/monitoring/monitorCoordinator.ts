@@ -148,7 +148,7 @@ export class MonitorCoordinator {
       try { await this.onSignal(event); } catch { /* Wakeup failure cannot discard committed intent or block other posts. */ }
     }
 
-    if (baseline && results.some((result) => result.state === 'online')) {
+    if (baseline && results.some((result) => result.state === 'online' || result.state === 'partial')) {
       this.database.updateSettings({ baselineComplete: true });
     }
 

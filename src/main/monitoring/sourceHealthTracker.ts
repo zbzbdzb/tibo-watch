@@ -42,6 +42,11 @@ export class SourceHealthTracker {
       this.sources.set(sourceId, disabled);
       return disabled;
     }
+    if (state === 'syncing' || state === 'partial') {
+      const progress = { ...previous, state, consecutiveFailures: 0, lastCheckedAt: checkedAt, errorCode };
+      this.sources.set(sourceId, progress);
+      return progress;
+    }
     const succeeded = state === 'online';
     const consecutiveFailures = succeeded ? 0 : previous.consecutiveFailures + 1;
     const next: SourceHealth = {

@@ -1,6 +1,6 @@
 export type SignalLevel = 'confirmed' | 'preview' | 'related' | 'irrelevant';
 export type PostKind = 'original' | 'reply' | 'quote';
-export type SourceState = 'online' | 'stale' | 'needs_login' | 'disabled' | 'error';
+export type SourceState = 'online' | 'syncing' | 'partial' | 'stale' | 'needs_login' | 'disabled' | 'error';
 
 export interface MonitoredPost {
   id: string;

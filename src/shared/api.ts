@@ -1,4 +1,5 @@
 import type { ClassificationResult, DeliveryStatusView, MonitoredPost, SignalEvent, SourceState } from './domain';
+import type { ChromePageDiagnostic } from './chromeDiagnostics';
 export type { DeliveryStatusView } from './domain';
 
 export interface RendererSettings {
@@ -38,6 +39,7 @@ export interface SourceHealthView {
   lastCheckedAt: string | null;
   lastSuccessAt: string | null;
   errorCode?: string | null;
+  collectionDiagnostics?: ChromePageDiagnostic[];
 }
 
 export interface MailQueueView {
