@@ -40,6 +40,33 @@ describe('SMTP recipient accounting', () => {
     expect(JSON.stringify(receipt)).not.toContain('dummy-password');
   });
 
+  it.each([
+    ['EMAIL_PROXY_TIMEOUT', 'proxy details', 'CONN', 'EMAIL_PROXY_TIMEOUT'],
+    ['EMAIL_PROXY_UNAVAILABLE', 'proxy details', 'CONN', 'EMAIL_PROXY_UNAVAILABLE'],
+    ['EMAIL_PROXY_AUTH_REQUIRED', 'proxy details', 'CONN', 'EMAIL_PROXY_AUTH_REQUIRED'],
+    ['ETIMEDOUT', 'Connection timeout', 'CONN', 'EMAIL_CONNECTION_TIMEOUT'],
+    ['ETIMEDOUT', 'Greeting never received', 'CONN', 'EMAIL_GREETING_TIMEOUT'],
+    ['ETIMEDOUT', 'Timeout', 'DATA', 'EMAIL_SEND_TIMEOUT'],
+    ['EAUTH', 'secret must not reach UI', 'AUTH', 'EAUTH'],
+  ])('preserves and sanitizes connection stage %s / %s', async (code, message, command, expected) => {
+    const { channel } = setup(Object.assign(new Error(message), { code, command }));
+    expect(await channel.sendTestEmail()).toMatchObject({ state: 'failed', errorCode: expected, acceptedRecipients: [] });
+  });
+
+  it('passes the system socket factory to real Nodemailer without disabling TLS', async () => {
+    const { database } = setup({ accepted: [], rejected: [] });
+    const getSocket = vi.fn<NonNullable<SMTPTransport.Options['getSocket']>>((_options, callback) => {
+      callback(Object.assign(new Error('private proxy details'), { code: 'EMAIL_PROXY_UNAVAILABLE' }), {});
+    });
+    const channel = new EmailChannel({ database, getPassword: () => 'dummy-password-never-log', getSocket });
+    expect(await channel.sendTestEmail()).toMatchObject({ state: 'failed', errorCode: 'EMAIL_PROXY_UNAVAILABLE' });
+    expect(getSocket).toHaveBeenCalledOnce();
+    const options = getSocket.mock.calls[0]![0];
+    expect(options.secure || options.requireTLS).toBe(true);
+    expect(options.tls?.rejectUnauthorized).not.toBe(false);
+    expect(options).not.toHaveProperty('secured');
+  });
+
   it('uses immutable snapshots and stable per-event/recipient Message-ID across retries', async () => {
     const { database, channel, sendMail } = setup({ accepted: ['a@example.com'], rejected: [] });
     database.upsertPost({ ...database.getPost('1')!, text: 'newer and longer text that was never in original evidence' });

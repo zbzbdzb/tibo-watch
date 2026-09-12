@@ -31,6 +31,77 @@ const RSS = `<?xml version="1.0" encoding="UTF-8"?>
 </channel></rss>`;
 
 describe('Nitter RSS source', () => {
+  const context = () => ({ checkedAt: '2026-09-12T08:20:00.000Z', signal: new AbortController().signal });
+
+  it('ignores status links, offline rows, duplicates and non-public sections', () => {
+    expect(parseInstanceRegistry(`## Official
+| [official](https://official.test) | ✅ | ✅ |
+## Public
+For instances working now, see [nitter-status](https://status.test).
+| [one](https://one.test) | ✅ | working | [SSL](https://ssl.test) |
+| [one](https://one.test/) | ✅ | ✅ |
+| [dead](https://dead.test) | ❌ | ✅ |
+| [broken](https://broken.test) | ✅ | ❌ |
+### Tor
+| [tor](https://tor.test) | ✅ | ✅ |`)).toEqual(['https://one.test']);
+  });
+
+  it('tries the verified instance without first depending on registry availability', async () => {
+    const fetcher = vi.fn(async () => new Response(RSS));
+    const source = new PublicRssSource({ fetcher });
+    expect((await source.check(context())).state).toBe('online');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledWith('https://nitter.perennialte.ch/thsottiaux/with_replies/rss', expect.objectContaining({
+      credentials: 'omit', cache: 'no-store', redirect: 'manual',
+    }));
+  });
+
+  it('discovers a replacement and prioritizes the last working instance on the next check', async () => {
+    const fetcher = vi.fn(async (url: string) => {
+      if (url.includes('Instances.md')) return new Response('## Public\n| [two](https://two.test) | ✅ | ✅ |');
+      return url.startsWith('https://two.test') ? new Response(RSS) : new Response('unavailable', { status: 503 });
+    });
+    const source = new PublicRssSource({ fetcher });
+    expect((await source.check(context())).state).toBe('online');
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    fetcher.mockClear();
+    expect((await source.check(context())).state).toBe('online');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0]?.[0]).toBe('https://two.test/thsottiaux/with_replies/rss');
+  });
+
+  it('rejects challenge HTML and malformed XML even when HTTP returns 200', async () => {
+    expect(parseNitterRss('<html><body>Verify you are human</body></html>', 'public-rss')).toEqual([]);
+    expect(parseNitterRss(RSS.replace('</channel>', ''), 'public-rss')).toEqual([]);
+    const fetcher = vi.fn(async (url: string) => new Response(url.startsWith('https://valid.test') ? RSS : '<html>challenge</html>'));
+    const source = new PublicRssSource({ fetcher, preferredInstances: ['https://challenge.test', 'https://valid.test'] });
+    expect((await source.check(context())).state).toBe('online');
+    expect(source.lastWorkingInstance).toBe('https://valid.test');
+  });
+
+  it('retries discovery after a temporary registry outage', async () => {
+    let registryAvailable = false;
+    const fetcher = vi.fn(async (url: string) => {
+      if (url.includes('Instances.md') && registryAvailable) return new Response('## Public\n| [new](https://new.test) | ✅ | ✅ |');
+      return url.startsWith('https://new.test') ? new Response(RSS) : new Response('unavailable', { status: 503 });
+    });
+    const source = new PublicRssSource({ fetcher });
+    expect((await source.check(context())).state).toBe('error');
+    registryAvailable = true;
+    expect((await source.check(context())).state).toBe('online');
+    expect(fetcher.mock.calls.filter(([url]) => url.includes('Instances.md'))).toHaveLength(2);
+  });
+
+  it('bounds failed instance attempts and stops before any request when cancelled', async () => {
+    const fetcher = vi.fn(async () => new Response('unavailable', { status: 503 }));
+    const source = new PublicRssSource({ fetcher, maxInstancesPerCheck: 1 });
+    expect((await source.check(context())).state).toBe('error');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    fetcher.mockClear();
+    await expect(source.check({ ...context(), signal: AbortSignal.abort() })).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('parses originals and replies, normalizes canonical links, and ignores reposts', () => {
     expect(parseNitterRss(RSS, 'public-rss')).toEqual([
       expect.objectContaining({
@@ -90,7 +161,7 @@ describe('Nitter RSS source', () => {
       if (url.startsWith('https://one.test')) return new Response('bad gateway', { status: 502 });
       return new Response(RSS, { status: 200 });
     });
-    const source = new PublicRssSource({ fetcher });
+    const source = new PublicRssSource({ fetcher, preferredInstances: [] });
 
     const result = await source.check({
       checkedAt: '2026-07-31T05:00:00.000Z',
@@ -116,7 +187,7 @@ describe('Nitter RSS source', () => {
       }
       return new Response(RSS, { status: 200 });
     }) as typeof fetch;
-    const source = new PublicRssSource({ fetcher, requestTimeoutMs: 5 });
+    const source = new PublicRssSource({ fetcher, requestTimeoutMs: 5, preferredInstances: [] });
 
     const result = await source.check({
       checkedAt: '2026-07-31T05:00:00.000Z',

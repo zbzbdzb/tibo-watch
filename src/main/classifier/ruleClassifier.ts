@@ -1,6 +1,7 @@
 import type { Classifier, ClassificationInput, ClassificationResult } from '../../shared/domain';
+import { resetCompletion, resetInProgress, resetScheduledAction, type PredicateSpan } from './resetPredicate';
 
-const CLASSIFIER_VERSION = 'rules-v8';
+const CLASSIFIER_VERSION = 'rules-v9';
 type Source = 'primary' | 'quote';
 type Level = 'confirmed' | 'preview' | 'related';
 
@@ -46,10 +47,10 @@ const ACTION = /\b(?:reset(?:s|ting|ing|ed|ted)?|refill(?:s|ed|ing)?|replenish(?
 const PRODUCT = /\b(?:codex|chatgpt work)\b/gi;
 const QUOTA = /\b(?:brand new usage|usage limits?|rate limits?|usage|quotas?|allowances?|credits?|\d+h limit)\b/gi;
 const AUDIENCE = /\b(?:everyone|all users?|paid users?|paid subscriptions?|subscribers?|all plans?)\b/gi;
-const OTHER_OBJECT = /\b(?:passwords?|sleep schedule|water bottles?|expectations?|factory|server|database|router|device|demo|test|staging|environment|cache|repository|git branch|computer|phone|clock|timer)\b/gi;
+const OTHER_OBJECT = /\b(?:passwords?|sleep schedule|water bottles?|expectations?|factory|servers?|databases?|routers?|devices?|jobs?|demo|test|staging|environments?|caches?|repositor(?:y|ies)|git branch|computers?|phones?|clocks?|timers?)\b/gi;
 const FUTURE_TIME = /\b(?:within\s+(?:about\s+)?\d+\s+(?:minutes?|hours?|days?)|in\s+(?:about\s+|~\s*)?\d+\s+(?:minutes?|hours?|days?)|next\s+(?:(?:few|couple(?:\s+of)?|\d+)\s+)?(?:minutes?|hours?|days?|weeks?)|later(?:\s+(?:today|tonight|this week))?|soon|shortly|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|by end of day|(?:by|at|around)\s+\d+(?::\d+)?\s*(?:am|pm)\s*(?:p[sd]?t)?|during the day)\b/gi;
 const FUTURE_MODAL = /\b(?:will|shall|going to|about to|set to|scheduled to|should\s+(?:land|arrive|roll out)|give us)\b|\b(?:i|we)'ll\b/gi;
-const RESET_FORM = 'reset(?:s|ting|ing|ed|ted)?|refilled|replenished|restored|topped up';
+const DEADLINE = /\b(?:by|before|at|around)\s+(?:midnight|noon|midday|end of (?:the )?day|\d{1,2}:\d{2})(?:\s+(?:today|tonight|tomorrow|p[sd]?t|utc))?\b/gi;
 const NEGATION_REASON = '包含否定或撤回语气，未升级为预告';
 
 export async function classifyPost(input: ClassificationInput): Promise<ClassificationResult> {
@@ -71,7 +72,8 @@ export async function classifyPost(input: ClassificationInput): Promise<Classifi
   const quota = primary.flatMap((clause) => matches(clause, QUOTA));
   const audience = primary.filter((clause) => !actions.some((action) => action.clause.index === clause.index && action.object === 'other'))
     .flatMap((clause) => matches(clause, AUDIENCE));
-  const quoteContext = quote.flatMap((clause) => matches(clause, QUOTA));
+  const quoteContext = quote.flatMap((clause) => [...matches(clause, QUOTA),
+    ...(matches(clause, ACTION).length && !matches(clause, OTHER_OBJECT).length ? matches(clause, PRODUCT) : [])]);
   const contextualTease = primary.some((clause) => /\b(?:milestone|celebration)\b/i.test(clause.text))
     && primary.some((clause) => /\b(?:codex|button)\b/i.test(clause.text));
   if (quota.length || audience.length || quoteContext.length || contextualTease) {
@@ -90,7 +92,7 @@ function buildActions(primary: Clause[], quote: Clause[], author: string): Actio
       const next = hits[index + 1];
       const left = previous ? previous.end - clause.start : 0;
       const right = next ? next.start - clause.start : clause.text.length;
-      const scope = sliceClause(clause, left, right);
+      const scope = predicateScope(sliceClause(clause, left, right), action);
       const offset = action.start - scope.start;
       const before = scope.text.slice(0, offset);
       const after = scope.text.slice(offset + action.raw.length);
@@ -119,8 +121,12 @@ function buildActions(primary: Clause[], quote: Clause[], author: string): Actio
         : /\b(?:is|are|was|were|has|have)\b/i.test(before + after) ? 'passive' : 'unspecified';
       const polarity = isNegated(scope, action) ? 'negated' : 'asserted';
       const modality = /\?|\b(?:which|what if)\b|\b(?:should|could|can|shall)\s+(?:i|we)\b/i.test(scope.text) ? 'question'
-        : /\b(?:might|maybe|perhaps|consider(?:ing)?|thinking about|hope to|could)\b/i.test(before) ? 'speculative' : 'statement';
-      const future = [...matches(scope, FUTURE_TIME), ...matches(scope, FUTURE_MODAL)];
+        : /\b(?:might|maybe|perhaps|consider(?:ing)?|thinking about|hope to|could|if|unless)\b/i.test(before)
+          || /^\s+(?:(?:is|has)\s+)?(?:maybe|perhaps|possibly|reportedly|allegedly|might|could|would)\b/i.test(after) ? 'speculative' : 'statement';
+      const scheduled = evidenceFromSpans(scope, resetScheduledAction(scope.text, action.end - scope.start));
+      const future = [...matches(scope, FUTURE_TIME), ...matches(scope, FUTURE_MODAL), ...matches(scope, DEADLINE)];
+      if (scheduled.length || matches(scope, FUTURE_MODAL).length) future.push(...matches(scope, /\btoday\b/gi));
+      if (future.length && scheduled.length) future.push(...scheduled);
       const prefix = primary[clause.index - 1];
       if (prefix?.sentence === clause.sentence && /^(?:as part of|by|at|tomorrow|later)\b/i.test(prefix.text)
         && !matches(prefix, ACTION).length) future.unshift(...matches(prefix, FUTURE_TIME));
@@ -129,11 +135,14 @@ function buildActions(primary: Clause[], quote: Clause[], author: string): Actio
       if (future.length === 0 && /^(?:then\s+|and\s+)?(?:perform\s+(?:a\s+)?)?reset/i.test(scope.text)
         && priorAction?.clause.sentence === clause.sentence && priorAction.tense === 'future') future.push(...priorAction.future);
       const completion = completionEvidence(scope, action);
+      const inProgress = evidenceFromSpans(scope, resetInProgress(scope.text, action.start - scope.start, action.end - scope.start));
       const habitual = /\b(?:regular|occasional|usually|routinely)\b/i.test(scope.text)
         || /^\s+every\s+(?:\d+\s+)?(?:minutes?|hours?|days?|weeks?)\b/i.test(after);
       const historicalReport = /\b(?:previously promised|discussed|announced|announcement|was gifted|been \d+ years|years since)\b/i.test(scope.text);
-      const grammarFuture = matches(scope, FUTURE_MODAL).length > 0 || /\b(?:is|are) coming\b/i.test(after);
-      const progressing = /\b(?:i am|we are|we're|i'm|are|is)\s+(?:now\s+)?(?:resetting|reseting|refilling|replenishing|restoring)\b/i.test(scope.text);
+      const nominalDeadline = completion.length > 0 && matches(scope, DEADLINE).length > 0
+        && !/\b(?:has|have|was|were|already|just|ago|yesterday)\b/i.test(scope.text);
+      const grammarFuture = nominalDeadline || matches(scope, FUTURE_MODAL).length > 0 || /\b(?:is|are) coming\b/i.test(after);
+      const progressing = inProgress.length > 0;
       let tense: ActionCandidate['tense'] = habitual ? 'habitual' : historicalReport ? 'reported-past'
         : grammarFuture ? 'future'
         : completion.length && !progressing ? 'completed'
@@ -141,7 +150,7 @@ function buildActions(primary: Clause[], quote: Clause[], author: string): Actio
         : progressing ? 'in-progress' : 'unknown';
       if (tense === 'future' && /\b(?:ago|yesterday)\b/i.test(scope.text) && !matches(scope, FUTURE_MODAL).length) tense = 'reported-past';
       actions.push({ clause: scope, action, subject, object, polarity, modality, tense,
-        evidence: [action, ...localContext, ...(quoteScope?.object === 'quota' ? quoteScope.evidence : [])], future, completion });
+        evidence: [action, ...localContext, ...inProgress, ...(quoteScope?.object === 'quota' ? quoteScope.evidence : [])], future, completion });
     }
   }
   return actions;
@@ -155,6 +164,9 @@ function classifyAction(action: ActionCandidate, clauses: Clause[]): Candidate |
   if (action.subject === 'reported') return related(action, '引用或转述他人的重置，非作者额度公告');
   if (action.modality !== 'statement') return related(action, '疑问或不确定意向，未构成明确重置公告');
   if (action.tense === 'habitual' || action.tense === 'reported-past') return related(action, '常规重置或历史讨论，不是当前重置公告');
+  if (/^restor/i.test(action.action.raw) && /\b(?:\d+[- ]?(?:h|hours?)|five[- ]hour|weekly|daily)\s+(?:usage\s+)?limits?\b/i.test(action.clause.text)) {
+    return related(action, '恢复周期用量限制，不等于重置已有额度');
+  }
   // A button being given/found is not itself a completed quota reset.
   if (/\breset button\b/i.test(action.clause.text)) return related(action, '涉及重置按钮，但未明确执行额度重置');
 
@@ -187,22 +199,23 @@ function classifyAction(action: ActionCandidate, clauses: Clause[]): Candidate |
 }
 
 function completionEvidence(clause: Clause, action: Evidence): Evidence[] {
-  const expressions = [
-    new RegExp("\\b(?:i|we)(?:'ve|\\s+have)\\s+(?:now\\s+|just\\s+)?(?:" + RESET_FORM + ")\\b", 'gi'),
-    new RegExp("\\b(?:has|have)\\s+(?:now\\s+)?been\\s+(?:now\\s+)?(?:" + RESET_FORM + ")\\b", 'gi'),
-    new RegExp("\\b(?:was|were)\\s+(?:" + RESET_FORM + ")\\b", 'gi'),
-    new RegExp("\\bjust\\s+(?:" + RESET_FORM + ")\\b", 'gi'),
-    /\b(?:i am|we are|we're|i'm|are|is)\s+(?:now\s+)?(?:resetting|reseting|refilling|replenishing|restoring)\b/gi,
-    /\b(?:are|is)\s+(?:now\s+)?reset\s+now\b/gi,
-    /\breset\s+has\s+(?:landed|been\s+propagated)\b/gi,
-  ];
-  const evidence = expressions.flatMap((pattern) => matches(clause, pattern)).filter((item) => item.start <= action.start && item.end >= action.end);
-  const after = sliceClause(clause, action.end - clause.start, clause.text.length);
-  // Only predicates governed by the reset noun, not another noun's "live" or "landed".
-  if (/^\s+(?:(?:for|of)\s+(?:all\s+)?(?:users|everyone|codex usage limits)\s+)?(?:has\s+(?:now\s+)?(?:landed|been\s+(?:propagated|completed|finished))|(?:is|was)\s+(?:now\s+)?(?:live|done|completed|finished)|happened)\b/i.test(after.text)) {
-    evidence.push(...matches(after, /\b(?:has\s+(?:now\s+)?(?:landed|been\s+(?:propagated|completed|finished))|live|done|completed|finished|happened)\b/gi));
+  return evidenceFromSpans(clause, resetCompletion(clause.text, action.start - clause.start, action.end - clause.start));
+}
+
+function evidenceFromSpans(clause: Clause, spans: PredicateSpan[]): Evidence[] {
+  return spans.map(span => ({ source: clause.source, start: clause.start + span.start, end: clause.start + span.end,
+    raw: clause.raw.slice(span.start, span.end) }));
+}
+
+/** Do not borrow the timing/negation of a second subject's independent predicate. */
+function predicateScope(clause: Clause, action: Evidence): Clause {
+  const boundaries = /,\s*(?=(?:the|a|an|we|they|our|another)\b)|\s+(?:while|whereas|although|because|after|before|and|but)\s+(?=(?:the|a|an|we|i|you|they|it|our|your|another|fixes|updates)\b)/gi;
+  let left = 0, right = clause.text.length;
+  for (const hit of clause.text.matchAll(boundaries)) {
+    if (clause.start + hit.index >= action.end) { right = hit.index; break; }
+    if (clause.start + hit.index + hit[0].length <= action.start) left = hit.index + hit[0].length;
   }
-  return evidence;
+  return sliceClause(clause, left, right);
 }
 
 function isNegated(clause: Clause, action?: Evidence): boolean {
@@ -211,8 +224,8 @@ function isNegated(clause: Clause, action?: Evidence): boolean {
   if (/\b(?:it is false that|untrue that|no such promise|made no .*promise|announcement was cancelled)\b/i.test(text)) return true;
   const before = action ? text.slice(0, action.start - clause.start) : text;
   const after = action ? text.slice(action.end - clause.start) : text;
-  return /\b(?:no|not|never)\s+(?:(?:a|the|another|full|banked|codex|usage|limits|quota|going to|do|perform|announce|announcing|promise|say|currently|actually|ever|now)\s+)*$/i.test(before)
-    || /\b(?:won't|don't|doesn't|didn't|haven't|hasn't|isn't|aren't|wasn't|weren't|will not|have not|has not)\s+(?:(?:be|been|going to|do|perform|announce|a|the|now|ever)\s+)*$/i.test(before)
+  return /\b(?:no|not|never)\s+(?:(?:a|the|another|full|banked|codex|usage|limits|quota|going to|be|being|do|perform|announce|announcing|promise|say|currently|actually|ever|now|yet|still|fully|successfully|all|also|completely|already)\s+)*$/i.test(before)
+    || /\b(?:won't|don't|doesn't|didn't|haven't|hasn't|isn't|aren't|wasn't|weren't|will not|have not|has not)\s+(?:(?:be|been|being|going to|do|perform|announce|a|the|now|ever|yet|still|fully|successfully|all|also|completely|currently|already)\s+)*$/i.test(before)
     || /^(?:\s+(?:for|of)\s+[\w ]+?)?\s+(?:is|was|has|will|would|should)\s+(?:not|never)\b/i.test(after)
     || /^\s+(?:isn't|wasn't|won't|hasn't)\b/i.test(after)
     || /\b(?:don't|do not)\s+(?:say|announce|promise)\s+(?:a\s+)?reset\b/i.test(text)
@@ -347,6 +360,6 @@ function result(level: ClassificationResult['level'], score: number, reasons: st
 }
 
 export class RuleClassifier implements Classifier {
-  readonly id = 'local-rules-v8';
+  readonly id = 'local-rules-v9';
   classify(input: ClassificationInput): Promise<ClassificationResult> { return classifyPost(input); }
 }

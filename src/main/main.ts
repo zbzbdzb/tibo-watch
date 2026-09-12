@@ -3,7 +3,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, safeStorage, shell, Tray,
+  app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, safeStorage, session, shell, Tray,
   type IpcMainInvokeEvent,
 } from 'electron';
 import { z } from 'zod';
@@ -14,12 +14,14 @@ import { RuleClassifier } from './classifier/ruleClassifier';
 import { MonitorCoordinator } from './monitoring/monitorCoordinator';
 import { DurableDeliveryWorker } from './notifications/durableDeliveryWorker';
 import { EmailChannel } from './notifications/emailChannel';
+import { createSystemSmtpSocket } from './notifications/smtpProxy';
 import { WindowsChannel } from './notifications/windowsChannel';
 import { CredentialStore } from './security/credentialStore';
 import { ChromeCompanionBridge } from './sources/chromeCompanionBridge';
 import { ChromeCompanionSession } from './sources/chromeCompanionSession';
 import { ConfiguredSource } from './sources/configuredRssSource';
 import { PublicRssSource } from './sources/publicRssSource';
+import { createSystemRssFetcher } from './sources/rssTransport';
 import { XBrowserSource } from './sources/xBrowserSource';
 import {
   buildLoginItemSettings,
@@ -117,7 +119,9 @@ app.whenReady().then(async () => {
     showChromeCompanionSetup,
     () => chromeCompanionBridge.setMonitoringEnabled(false),
   );
-  emailChannel = new EmailChannel({ database, getPassword: () => credentials.getSmtpPassword() });
+  emailChannel = new EmailChannel({ database, getPassword: () => credentials.getSmtpPassword(),
+    getSocket: createSystemSmtpSocket(() => session.fromPartition('tibo-watch-smtp', {cache:false})),
+  });
   const windowsChannel = new WindowsChannel(database, (postId) => showMainWindow(postId));
   deliveryWorker = new DurableDeliveryWorker({
     database, windows: windowsChannel, email: emailChannel,
@@ -128,7 +132,9 @@ app.whenReady().then(async () => {
   });
   const rssSource: PostSource = process.env.TIBO_WATCH_E2E === '1'
     ? createE2eSource()
-    : new PublicRssSource();
+    : new PublicRssSource({
+      fetcher: createSystemRssFetcher(() => session.fromPartition('tibo-watch-public-rss', { cache: false })),
+    });
   const rss = new ConfiguredSource(rssSource, () => database.getSettings().publicRssEnabled);
   const browser = new XBrowserSource(xSession, () => database.getSettings().browserSourceEnabled);
   coordinator = new MonitorCoordinator({

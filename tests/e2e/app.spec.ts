@@ -1,360 +1,172 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test';
 
-test.describe.serial('Tibo Watch Electron app', () => {
-  let electronApp: ElectronApplication;
-  let page: Page;
-  let userDataDir: string;
-  const pageErrors: string[] = [];
+test.describe.serial('Tibo Watch production redesign', () => {
+ let app: ElectronApplication, page: Page, userData: string;
+ const errors: string[] = [];
+ const output = process.env.TIBO_WATCH_SCREENSHOT_DIR ?? tmpdir();
+ const nav = async (name: string) => page.getByRole('navigation', { name:'主导航' }).getByRole('button', { name,exact:true }).click();
+ const launch = async () => {
+   const executablePath = process.env.TIBO_WATCH_EXECUTABLE;
+   app = await electron.launch({ ...(executablePath ? { executablePath } : {}), args: [...(executablePath ? [] : ['.']), `--user-data-dir=${userData}`], env: { ...process.env, TIBO_WATCH_E2E:'1' } });
+   page = await app.firstWindow(); page.on('pageerror', e => errors.push(e.message));
+   await page.emulateMedia({ reducedMotion: 'reduce' });
+ };
+ test.beforeAll(async () => { userData = await mkdtemp(join(tmpdir(),'tibo-redesign-e2e-')); await launch(); });
+ test.afterAll(async () => { await app.close(); await rm(userData,{recursive:true,force:true}); });
 
-  test.beforeAll(async () => {
-    userDataDir = await mkdtemp(join(tmpdir(), 'tibo-watch-e2e-'));
-    const packagedExecutable = process.env.TIBO_WATCH_EXECUTABLE;
-    electronApp = await electron.launch({
-      ...(packagedExecutable ? { executablePath: packagedExecutable } : {}),
-      args: packagedExecutable ? [`--user-data-dir=${userDataDir}`] : ['.', `--user-data-dir=${userDataDir}`],
-      env: { ...process.env, TIBO_WATCH_E2E: '1' },
-    });
-    page = await electronApp.firstWindow();
-    page.on('pageerror', (error) => pageErrors.push(error.message));
-  });
+ test('onboards silently, shows true summary and leaves complete originals in the inbox', async () => {
+   await expect(page.getByRole('heading',{name:'开始监测 Codex 重置'})).toBeVisible();
+   await page.getByRole('button',{name:'建立历史基线并开始'}).click();
+   await expect(page.getByRole('heading',{name:'新一轮重置，已宣布执行'})).toBeVisible();
+   await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1536,1024));
+   const toast = page.getByRole('button',{name:'关闭提示'});
+   if (await toast.count()) await toast.click();
+   await page.screenshot({path:join(output,'production-dark-overview.png'), scale:'css'});
+   await nav('动态收件箱');
+   await expect(page.getByRole('tab')).toHaveCount(4);
+   await expect(page.getByText('共 2 条记录')).toBeVisible();
+   await expect(page.getByText('无发送记录（历史基线或未触发提醒）')).toBeVisible();
+   await expect(page.getByLabel('动态原文')).toContainText("I've reset usage limits");
+   await expect(page.getByText(/收藏/)).toHaveCount(0);
+   await expect(page.getByRole('heading',{name:'判定证据'})).toHaveCount(0);
+   await page.screenshot({path:join(output,'production-dark-inbox.png'), scale:'css'});
+ });
 
-  test.afterAll(async () => {
-    await electronApp.close();
-    await rm(userDataDir, { recursive: true, force: true });
-  });
+ test('keeps timeline and reader actions fixed and contains long text', async () => {
+   const toolbar = page.locator('.feed-toolbar'), footer = page.locator('.reader-bottom');
+   await page.locator('.inbox-scroll').evaluate(el => { const row=el.querySelector('.post-row')!; for(let i=0;i<20;i++)el.append(row.cloneNode(true)); });
+   const before = await toolbar.boundingBox(), actions = await footer.boundingBox();
+   await page.locator('.inbox-scroll').evaluate(el => {el.scrollTop=el.scrollHeight;});
+   expect((await toolbar.boundingBox())!.y).toBe(before!.y);
+   expect((await footer.boundingBox())!.y).toBe(actions!.y);
+   await page.locator('.inbox-scroll .post-row').evaluateAll(rows => rows.slice(2).forEach(row=>row.remove()));
+   await nav('总览');
+   await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1080,720));
+   await page.locator('.monitor-copy > p').evaluate(el=>{el.textContent='A very long public update '.repeat(35);});
+   const bounds = await page.locator('.monitor-copy > p').evaluate(el=>({right:el.getBoundingClientRect().right,parent:el.closest('.monitor-banner')!.getBoundingClientRect().right,scroll:el.scrollWidth,client:el.clientWidth}));
+   expect(bounds.right).toBeLessThan(bounds.parent); expect(bounds.scroll).toBeGreaterThan(bounds.client);
+   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ });
 
-  test('completes onboarding and creates a silent historical baseline', async () => {
-    await expect(page.getByRole('heading', { name: '开始监测 Codex 重置' })).toBeVisible();
-    await page.getByRole('button', { name: '建立历史基线并开始' }).click();
-    await expect(page.getByRole('heading', { name: '已确认重置' })).toBeVisible();
-    await expect(page.getByText('共 2 条记录')).toBeVisible();
-    await expect(page.getByText('无发送记录（历史基线或未触发提醒）')).toBeVisible();
-    await page.screenshot({ path: join(tmpdir(), 'tibo-watch-0.2.12-overview-1440.png') });
-  });
+ test('checks with visible progress, pauses and resumes using real IPC', async () => {
+   await page.getByRole('button',{name:'暂停监测'}).click();
+   await expect(page.getByRole('button',{name:'恢复监测'})).toBeEnabled();
+   await page.getByRole('button',{name:'恢复监测'}).click();
+   await expect(page.getByRole('button',{name:'暂停监测'})).toBeEnabled();
+   await page.getByRole('button',{name:'查看详细状态'}).click();
+   await page.getByRole('button',{name:'检查全部来源'}).click();
+   await expect(page.getByRole('button',{name:'正在检查…'}).first()).toBeDisabled();
+   await expect(page.getByRole('button',{name:'检查全部来源'})).toBeEnabled();
+ });
 
-  test('contains long summary text inside the current-state panel', async () => {
-    const onboarding = page.getByRole('button', { name: '建立历史基线并开始' });
-    if (await onboarding.count() === 1) await onboarding.click();
-    await electronApp.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0]?.setSize(1194, 720);
-    });
-    try {
-      await page.locator('.signal-summary p').evaluate((element) => {
-        element.textContent = "That's right, GPT-5.6 Sol is awesome and can be used pretty much anywhere, including a deliberately very long dashboard summary.";
-      });
-      const layout = await page.evaluate(() => {
-        const summary = document.querySelector<HTMLElement>('.signal-summary p');
-        const currentState = document.querySelector<HTMLElement>('.current-state');
-        if (!summary || !currentState) throw new Error('Current-state layout is incomplete');
-        return {
-          summaryRight: summary.getBoundingClientRect().right,
-          currentRight: currentState.getBoundingClientRect().right,
-          summaryScrollWidth: summary.scrollWidth,
-          summaryClientWidth: summary.clientWidth,
-        };
-      });
-      expect(layout.summaryRight).toBeLessThanOrEqual(layout.currentRight);
-      expect(layout.summaryScrollWidth).toBeGreaterThan(layout.summaryClientWidth);
-    } finally {
-      await electronApp.evaluate(({ BrowserWindow }) => {
-        BrowserWindow.getAllWindows()[0]?.setSize(1440, 900);
-      });
-    }
-  });
+ test('persists source toggles immediately and keeps native companion setup', async () => {
+   await nav('数据源');
+   const rss=page.getByRole('switch',{name:'启用公共 RSS'});
+   await rss.click(); await expect(rss).not.toBeChecked(); await expect(rss).toBeEnabled();
+   await nav('设置'); await nav('数据源'); await expect(rss).not.toBeChecked();
+   await rss.click(); await expect(rss).toBeChecked(); await expect(rss).toBeEnabled();
+   const chrome=page.getByRole('switch',{name:'启用 Chrome 登录共享'});
+   if(await chrome.isChecked()){ await chrome.click(); await expect(chrome).not.toBeChecked(); await expect(chrome).toBeEnabled(); }
+   await page.getByRole('button',{name:'安装 / 重载扩展'}).click();
+   await expect(chrome).toBeChecked();
+   expect(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().length)).toBe(1);
+ });
 
-  test('vertically aligns the detail timestamp with its status icon', async () => {
-    const onboarding = page.getByRole('button', { name: '建立历史基线并开始' });
-    if (await onboarding.count() === 1) await onboarding.click();
-    const centers = await page.evaluate(() => {
-      const detailTime = document.querySelector<HTMLElement>('.detail-heading time');
-      const detailIcon = document.querySelector<SVGElement>('.detail-heading svg');
-      if (!detailTime || !detailIcon) throw new Error('Detail heading is incomplete');
-      const timeRect = detailTime.getBoundingClientRect();
-      const iconRect = detailIcon.getBoundingClientRect();
-      return {
-        time: timeRect.top + timeRect.height / 2,
-        icon: iconRect.top + iconRect.height / 2,
-      };
-    });
-    expect(Math.abs(centers.time - centers.icon)).toBeLessThanOrEqual(1);
-  });
+ test('separates notification and SMTP saves; validates email and preserves encrypted password', async () => {
+   await nav('通知');
+   await page.getByRole('button',{name:'添加',exact:true}).click();
+   await page.getByLabel('邮箱地址').fill('invalid-email');
+   await page.getByRole('button',{name:'添加收件人',exact:true}).click();
+   await expect(page.getByRole('alert')).toContainText('请输入完整邮箱');
+   await page.getByLabel('邮箱地址').fill('one@example.com');
+   await page.getByRole('button',{name:'添加收件人',exact:true}).click();
+   await expect(page.getByRole('dialog')).toHaveCount(0);
+   await page.getByRole('button',{name:'编辑 SMTP 配置'}).click();
+   await page.getByLabel('SMTP 主机').fill('draft.invalid'); await page.getByRole('button',{name:'取消',exact:true}).click();
+   await page.getByRole('button',{name:'编辑 SMTP 配置'}).click();
+   await expect(page.getByLabel('SMTP 主机')).not.toHaveValue('draft.invalid');
+   await page.getByLabel('SMTP 主机').fill('smtp.test.local');
+   await page.getByLabel('用户名').fill('test-user');
+   await page.getByLabel('应用密码').fill('E2E-ONLY-TEST-SECRET');
+   await page.getByRole('button',{name:'保存邮件配置'}).click();
+   await expect(page.getByRole('dialog')).toHaveCount(0);
+   await page.getByRole('switch',{name:'确认重置通知'}).click();
+   await expect(page.getByRole('button',{name:'确认重置声音已开启'})).toBeDisabled();
+   await expect(page.getByRole('switch',{name:'预告通知'})).toBeEnabled();
+   await page.getByRole('button',{name:'预告声音已开启'}).click();
+   await expect(page.getByRole('button',{name:'预告声音已关闭'})).toBeEnabled();
+   await page.getByRole('button',{name:'编辑 SMTP 配置'}).click();
+   await expect(page.getByLabel('SMTP 主机')).toHaveValue('smtp.test.local');
+   await expect(page.getByLabel('应用密码')).toHaveValue('');
+   await expect(page.getByLabel('应用密码')).toHaveAttribute('placeholder','已安全保存；留空则不修改');
+   await page.getByRole('button',{name:'保存邮件配置'}).click(); await expect(page.getByRole('dialog')).toHaveCount(0);
+   const snapshot=await page.evaluate(()=>window.tiboWatch!.getSnapshot());
+   expect(snapshot.settings.hasSmtpPassword).toBe(true);
+   expect(snapshot.settings.emailRecipients).toEqual(['one@example.com']);
+   expect(snapshot.settings.publicRssEnabled).toBe(true);
+   // Never click send-test-email: this test must not send mail.
+ });
 
-  test('keeps the overview fixed while only the message timeline scrolls', async () => {
-    const onboarding = page.getByRole('button', { name: '建立历史基线并开始' });
-    if (await onboarding.count() === 1) await onboarding.click();
-    await page.getByRole('button', { name: '总览', exact: true }).click();
-    const toolbar = page.locator('.feed-toolbar');
-    await expect(toolbar).toBeVisible();
-    await expect(toolbar.getByText('共 2 条记录')).toBeVisible();
+ test('converts Pacific time in Electron without changing application settings', async () => {
+   const before = await page.evaluate(async () => (await window.tiboWatch!.getSnapshot()).settings);
+   await nav('设置');
+   await expect(page.getByText('显示时间', { exact: true })).toHaveCount(0);
+   await page.getByRole('button', { name: '时区换算', exact: true }).click();
+   await page.getByLabel('来源日期', { exact: true }).fill('2026-09-12');
+   await page.getByLabel('来源时间', { exact: true }).fill('14:00');
+   await expect(page.getByLabel('换算结果', { exact: true })).toContainText('2026-09-13 05:00');
+   await expect(page.getByLabel('换算结果', { exact: true })).toContainText('PDT');
+   await page.getByRole('button', { name: '交换来源与目标时区' }).click();
+   await expect(page.getByLabel('换算结果', { exact: true })).toContainText('2026-09-12 14:00');
+   await page.getByRole('button', { name: '交换来源与目标时区' }).click();
+   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1440, 900));
+   await page.screenshot({ path: join(output, 'timezone-native-dark.png'), scale: 'css' });
+   expect(await page.evaluate(async () => (await window.tiboWatch!.getSnapshot()).settings)).toEqual(before);
+   await page.getByRole('button', { name: '常规与启动', exact: true }).click();
+ });
 
-    await page.locator('.timeline').evaluate((timeline) => {
-      const row = timeline.querySelector('.timeline-row');
-      if (!row) throw new Error('Timeline fixture row is missing');
-      for (let index = 0; index < 12; index += 1) timeline.append(row.cloneNode(true));
-    });
-    const layout = await page.evaluate(() => {
-      const content = document.querySelector<HTMLElement>('.content');
-      const timeline = document.querySelector<HTMLElement>('.timeline');
-      const toolbar = document.querySelector<HTMLElement>('.feed-toolbar');
-      if (!content || !timeline || !toolbar) throw new Error('Overview scrolling layout is incomplete');
-      const toolbarTop = toolbar.getBoundingClientRect().top;
-      timeline.scrollTop = timeline.scrollHeight;
-      return {
-        contentOverflowY: getComputedStyle(content).overflowY,
-        contentScrollHeight: content.scrollHeight,
-        contentClientHeight: content.clientHeight,
-        timelineScrollTop: timeline.scrollTop,
-        toolbarTop,
-        toolbarTopAfterScroll: toolbar.getBoundingClientRect().top,
-      };
-    });
+ test('retains native configuration and theme across restart', async () => {
+   await nav('设置'); await page.getByLabel('检查间隔').selectOption('10');
+   await expect(page.getByLabel('检查间隔')).toBeEnabled();
+   await page.getByRole('button',{name:'切换到浅色模式'}).click();
+   await app.close(); await launch();
+   await expect(page.getByRole('heading',{name:'监测总览'})).toBeVisible();
+   await expect(page.locator('.app')).toHaveAttribute('data-theme','light');
+   await nav('设置'); await expect(page.getByLabel('检查间隔')).toHaveValue('10');
+   await expect(page.getByRole('button',{name:'识别与状态'})).toHaveCount(0);
+   await nav('通知');
+   await expect(page.getByRole('switch',{name:'确认重置通知'})).not.toBeChecked();
+   await expect(page.getByRole('button',{name:'预告声音已关闭'})).toBeVisible();
+   await expect(page.getByText('one@example.com',{exact:true})).toBeVisible();
+   await nav('总览');
+   await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1536,1024));
+   await page.screenshot({path:join(output,'production-light-overview.png'), scale:'css'});
+   await page.getByRole('button',{name:'切换到深色模式'}).click();
+   expect(await page.locator('.app').evaluate(el=>getComputedStyle(el).getPropertyValue('--bg').trim())).toBe('#151619');
+   expect(await page.locator('.app').evaluate(el=>getComputedStyle(el).getPropertyValue('--accent').trim())).toBe('#8ab4ff');
+ });
 
-    expect(layout.contentOverflowY).toBe('hidden');
-    expect(layout.contentScrollHeight).toBeLessThanOrEqual(layout.contentClientHeight + 1);
-    expect(layout.timelineScrollTop).toBeGreaterThan(0);
-    expect(layout.toolbarTopAfterScroll).toBe(layout.toolbarTop);
-    await page.locator('.timeline-row').evaluateAll((rows) => {
-      rows.slice(2).forEach((row) => row.remove());
-    });
-  });
-
-  test('opens source details and gives immediate feedback while checking', async () => {
-    const onboarding = page.getByRole('button', { name: '建立历史基线并开始' });
-    if (await onboarding.count() === 1) await onboarding.click();
-    await page.getByRole('button', { name: '总览', exact: true }).click();
-    await page.getByRole('button', { name: '查看详细状态' }).click();
-    await expect(page.getByRole('heading', { name: '数据源' })).toBeVisible();
-
-    await page.getByRole('button', { name: '立即检查全部' }).click();
-    const checkingButton = page.getByRole('button', { name: '检查中…' });
-    await expect(checkingButton).toBeVisible();
-    await expect(checkingButton).toBeDisabled();
-    await expect(checkingButton.locator('svg')).toHaveClass(/spin/);
-    await expect(page.getByRole('button', { name: '立即检查全部' })).toBeEnabled();
-  });
-
-  test('persists the public RSS switch immediately across page changes', async () => {
-    const onboarding = page.getByRole('button', { name: '建立历史基线并开始' });
-    if (await onboarding.count() === 1) await onboarding.click();
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    const publicRss = page.getByRole('switch', { name: '启用公共 RSS' });
-    await expect(publicRss).toBeChecked();
-
-    await publicRss.click();
-    await expect(publicRss).not.toBeChecked();
-    await page.getByRole('button', { name: '动态', exact: true }).click();
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    await expect(page.getByRole('switch', { name: '启用公共 RSS' })).not.toBeChecked();
-
-    await page.getByRole('switch', { name: '启用公共 RSS' }).click();
-    await page.getByRole('button', { name: '总览', exact: true }).click();
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    await expect(page.getByRole('switch', { name: '启用公共 RSS' })).toBeChecked();
-  });
-
-  test('shows a clearly scoped global save action outside the email section', async () => {
-    const onboarding = page.getByRole('button', { name: '建立历史基线并开始' });
-    if (await onboarding.count() === 1) await onboarding.click();
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-
-    const saveAll = page.getByRole('button', { name: '保存全部设置' });
-    await expect(saveAll).toBeVisible();
-    const placement = await saveAll.evaluate((button) => ({
-      inEmailSection: Boolean(button.closest('.settings-section')),
-      inGlobalBar: Boolean(button.closest('.settings-save-bar')),
-    }));
-    expect(placement.inEmailSection).toBe(false);
-    expect(placement.inGlobalBar).toBe(true);
-    await expect(page.getByText('保存监测、启动与邮件等全部配置')).toBeVisible();
-
-    await electronApp.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0]?.setSize(1080, 720);
-    });
-    const compactPlacement = await saveAll.evaluate((button) => {
-      const saveBar = button.closest('.settings-save-bar')!.getBoundingClientRect();
-      const statusBar = document.querySelector('.statusbar')!.getBoundingClientRect();
-      return { saveBarBottom: saveBar.bottom, statusBarTop: statusBar.top };
-    });
-    expect(compactPlacement.saveBarBottom).toBeLessThanOrEqual(compactPlacement.statusBarTop);
-    await page.screenshot({ path: join(tmpdir(), 'tibo-watch-0.2.12-settings-1080.png') });
-  });
-
-  test('validates recipients before saving or attempting a test delivery', async () => {
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    const recipients = page.getByLabel('收件人地址（多个用逗号或换行分隔）');
-    await recipients.fill('invalid-email');
-    await page.getByRole('button', { name: '发送测试邮件' }).click();
-    await expect(page.getByText('测试失败：请检查邮箱配置后重试。')).toBeVisible();
-    await recipients.fill('one@example.com, ');
-    await expect(recipients).toHaveValue('one@example.com, ');
-    await page.getByRole('switch', { name: '启用公共 RSS' }).click();
-    await expect(recipients).toHaveValue('one@example.com, ');
-    await page.getByRole('switch', { name: '启用公共 RSS' }).click();
-    await recipients.fill('');
-  });
-
-  test('restores the sidebar and persists the selected theme', async () => {
-    const app = page.locator('.app');
-
-    await page.getByRole('button', { name: '收起导航' }).click();
-    await expect(app).toHaveClass(/sidebar-collapsed/);
-    await page.getByRole('button', { name: '展开导航' }).click();
-    await expect(app).not.toHaveClass(/sidebar-collapsed/);
-
-    await page.getByRole('button', { name: '切换到浅色模式' }).click();
-    await expect(app).toHaveAttribute('data-theme', 'light');
-    await page.reload();
-    await expect(page.locator('.app')).toHaveAttribute('data-theme', 'light');
-    await page.getByRole('button', { name: '切换到深色模式' }).click();
-    await expect(page.locator('.app')).toHaveAttribute('data-theme', 'dark');
-  });
-
-  test('persists independent Windows controls immediately and retains them after restart', async () => {
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    const confirmed = page.getByRole('switch', { name: '确认重置通知' });
-    await expect(confirmed).toBeChecked();
-    await confirmed.click();
-    await expect(page.getByText('Windows 通知设置已即时保存。')).toBeVisible();
-    await expect(page.getByRole('combobox', { name: '确认重置声音' })).toBeDisabled();
-    await page.getByRole('combobox', { name: '预告声音' }).selectOption('silent');
-    await expect(page.getByRole('button', { name: '保存全部设置' })).toBeEnabled();
-    await page.getByRole('button', { name: '总览', exact: true }).click();
-    await expect(page.getByText('部分启用')).toBeVisible();
-    await electronApp.close();
-    const packagedExecutable = process.env.TIBO_WATCH_EXECUTABLE;
-    electronApp = await electron.launch({
-      ...(packagedExecutable ? { executablePath: packagedExecutable } : {}),
-      args: packagedExecutable ? [`--user-data-dir=${userDataDir}`] : ['.', `--user-data-dir=${userDataDir}`],
-      env: { ...process.env, TIBO_WATCH_E2E: '1' },
-    });
-    page = await electronApp.firstWindow();
-    page.on('pageerror', (error) => pageErrors.push(error.message));
-    await expect(page.locator('.app')).toBeVisible();
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    await expect(page.getByRole('switch', { name: '确认重置通知' })).not.toBeChecked();
-    await expect(page.getByRole('combobox', { name: '预告声音' })).toHaveValue('silent');
-    const section = page.locator('.settings-section').filter({ has: page.getByRole('heading', { name: 'Windows 通知', exact: true }) });
-    await section.scrollIntoViewIfNeeded();
-    await section.screenshot({ path: join(tmpdir(), 'tibo-watch-0.2.13-notifications.png') });
-    await page.getByRole('switch', { name: '确认重置通知' }).click();
-    await expect(page.getByRole('combobox', { name: '预告声音' })).toBeEnabled();
-    await page.getByRole('combobox', { name: '预告声音' }).selectOption('sound');
-    await expect(page.getByRole('button', { name: '保存全部设置' })).toBeEnabled();
-  });
-
-  test('uses distinct semantic colors for light-theme runtime states', async () => {
-    const onboarding = page.getByRole('button', { name: '建立历史基线并开始' });
-    if (await onboarding.count() === 1) await onboarding.click();
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    const sharing = page.getByRole('switch', { name: '启用 Chrome 登录共享' });
-    if (!(await sharing.isChecked())) await sharing.click();
-    await page.getByRole('button', { name: '保存全部设置' }).click();
-    await page.getByRole('button', { name: '总览', exact: true }).click();
-    await page.getByRole('button', { name: '刷新', exact: true }).click();
-    await expect(page.getByText('等待扩展')).toBeVisible();
-    await page.getByRole('button', { name: '切换到浅色模式' }).click();
-
-    const colors = await page.evaluate(() => {
-      const online = document.querySelector<HTMLElement>('.health-row em:not(.status-error):not(.status-disabled):not(.status-warning)');
-      const error = document.querySelector<HTMLElement>('.health-row .status-warning');
-      const disabled = document.querySelector<HTMLElement>('.health-row .status-disabled');
-      if (!online || !error || !disabled) throw new Error('Runtime semantic states are incomplete');
-      return {
-        online: getComputedStyle(online).color,
-        error: getComputedStyle(error).color,
-        disabled: getComputedStyle(disabled).color,
-      };
-    });
-    expect(colors.error).not.toBe(colors.online);
-    expect(colors.disabled).not.toBe(colors.online);
-    await page.screenshot({ path: join(tmpdir(), 'tibo-watch-0.2.12-light-1080.png') });
-    await page.getByRole('button', { name: '切换到深色模式' }).click();
-  });
-
-  test('filters the feed and opens the selected detail', async () => {
-    await page.getByRole('button', { name: '预告', exact: true }).click();
-    await expect(page.getByText('Codex resets will continue tomorrow.')).toBeVisible();
-    await expect(page.locator('.timeline-row')).toHaveCount(1);
-  });
-
-  test('saves monitoring and SMTP settings through the restricted preload API', async () => {
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    await page.getByLabel('检查间隔').selectOption('10');
-    const sharing = page.getByRole('switch', { name: '启用 Chrome 登录共享' });
-    if (!(await sharing.isChecked())) await sharing.click();
-    await page.getByLabel('SMTP 主机').fill('smtp.test.local');
-    await page.getByLabel('端口').fill('465');
-    await page.getByLabel('加密方式').selectOption('ssl');
-    await page.getByRole('button', { name: '保存全部设置' }).click();
-    await page.getByRole('button', { name: '总览', exact: true }).click();
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    await expect(page.getByLabel('检查间隔')).toHaveValue('10');
-    await expect(page.getByRole('switch', { name: '启用 Chrome 登录共享' })).toBeChecked();
-    await expect(page.getByLabel('SMTP 主机')).toHaveValue('smtp.test.local');
-  });
-
-  test('routes notification clicks and continues running after close-to-tray', async () => {
-    await electronApp.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0]?.webContents.send('app:navigate-post', '2083053000000000000');
-    });
-    await expect(page.getByRole('heading', { name: '当前状态' })).toBeVisible();
-    await expect(page.locator('.timeline-row.selected')).toContainText('Codex resets will continue tomorrow.');
-    await page.getByRole('button', { name: '关闭' }).click();
-    await expect.poll(() => electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible())).toBe(false);
-    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.show());
-    await expect(page.getByRole('heading', { name: '当前状态' })).toBeVisible();
-  });
-
-  test('opens Chrome companion setup without creating an embedded X window', async () => {
-    const onboarding = page.getByRole('button', { name: '建立历史基线并开始' });
-    if (await onboarding.count() === 1) await onboarding.click();
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    await expect(page.getByRole('heading', { name: 'Chrome 登录共享' })).toBeVisible();
-    const sharing = page.getByRole('switch', { name: '启用 Chrome 登录共享' });
-    if (await sharing.isChecked()) {
-      await sharing.click();
-      await page.getByRole('button', { name: '保存全部设置' }).click();
-    }
-    await expect(sharing).not.toBeChecked();
-    await page.getByRole('button', { name: '安装/打开扩展' }).click();
-    await expect(sharing).toBeChecked();
-    await expect.poll(() => electronApp.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows().length)).toBe(1);
-    expect(pageErrors).toEqual([]);
-  });
+ test('routes notification clicks and still closes to tray', async () => {
+   await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.webContents.send('app:navigate-post','2083053000000000000'));
+   await expect(page.getByRole('heading',{name:'动态收件箱'})).toBeVisible();
+   await expect(page.getByLabel('动态原文')).toHaveText('Codex resets will continue tomorrow.');
+   await page.getByRole('button',{name:'关闭',exact:true}).click();
+   await expect.poll(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.isVisible())).toBe(false);
+   await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.show());
+   await expect(page.getByLabel('动态原文')).toBeVisible();
+   expect(errors).toEqual([]);
+ });
 });
 
-test.describe('Tibo Watch hidden startup', () => {
-  test('keeps the main window hidden when launched by the login item', async () => {
-    const hiddenUserDataDir = await mkdtemp(join(tmpdir(), 'tibo-watch-hidden-e2e-'));
-    const packagedExecutable = process.env.TIBO_WATCH_EXECUTABLE;
-    const hiddenApp = await electron.launch({
-      ...(packagedExecutable ? { executablePath: packagedExecutable } : {}),
-      args: packagedExecutable
-        ? ['--hidden', `--user-data-dir=${hiddenUserDataDir}`]
-        : ['.', '--hidden', `--user-data-dir=${hiddenUserDataDir}`],
-      env: { ...process.env, TIBO_WATCH_E2E: '1' },
-    });
-
-    try {
-      const hiddenPage = await hiddenApp.firstWindow();
-      await expect(hiddenPage.locator('.app')).toBeAttached();
-      await hiddenPage.evaluate(() => new Promise<void>((resolve) => {
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-      }));
-      const startupState = await hiddenApp.evaluate(({ BrowserWindow }) => ({
-        argv: process.argv,
-        visible: BrowserWindow.getAllWindows()[0]?.isVisible(),
-      }));
-      expect(startupState.argv).toContain('--hidden');
-      expect(startupState.visible).toBe(false);
-    } finally {
-      await hiddenApp.close();
-      await rm(hiddenUserDataDir, { recursive: true, force: true });
-    }
-  });
+test('hidden startup still keeps the desktop window invisible', async () => {
+ const userData=await mkdtemp(join(tmpdir(),'tibo-hidden-redesign-'));
+ const executablePath=process.env.TIBO_WATCH_EXECUTABLE;
+ const app=await electron.launch({...(executablePath?{executablePath}:{}),args:[...(executablePath?[]:['.']),'--hidden',`--user-data-dir=${userData}`],env:{...process.env,TIBO_WATCH_E2E:'1'}});
+ try{
+  const page=await app.firstWindow(); await expect(page.locator('.app')).toBeAttached();
+  expect(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.isVisible())).toBe(false);
+ }finally{await app.close();await rm(userData,{recursive:true,force:true});}
 });

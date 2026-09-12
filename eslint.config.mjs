@@ -5,7 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'release/**', 'coverage/**', 'playwright-report/**', 'test-results/**'] },
+  { ignores: ['dist/**', 'release/**', 'coverage/**', 'playwright-report/**', 'test-results/**', 'ui-preview/.build/**'] },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {

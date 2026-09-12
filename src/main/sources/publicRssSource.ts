@@ -1,10 +1,13 @@
-import { XMLParser } from 'fast-xml-parser';
+import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import type { CheckContext, MonitoredPost, PostSource, SourceCheckResult } from '../../shared/domain';
 
 const INSTANCE_REGISTRY =
   'https://raw.githubusercontent.com/wiki/zedeus/nitter/Instances.md';
 const FALLBACK_INSTANCES = ['https://nitter.privacyredirect.com'];
+// Verified with the application's parser on 2026-09-12. The community
+// registry can lag behind working instances, so try this before discovery.
+const PREFERRED_INSTANCES = ['https://nitter.perennialte.ch'];
 
 interface RssItem {
   title?: string;
@@ -19,6 +22,7 @@ export interface PublicRssSourceOptions {
   registryUrl?: string;
   requestTimeoutMs?: number;
   maxInstancesPerCheck?: number;
+  preferredInstances?: readonly string[];
 }
 
 function stripMarkup(value: string): string {
@@ -56,11 +60,13 @@ function descriptionParts(html: string): { primary: string; quotedText: string |
 export function parseInstanceRegistry(markdown: string): string[] {
   const results: string[] = [];
   const seen = new Set<string>();
-  const publicSection = markdown.split(/## Public\s*/i)[1]?.split(/###\s+(?:Tor|I2P)/i)[0] ?? markdown;
+  const publicSection = markdown.split(/^## Public[ \t]*\r?$/im)[1]?.split(/^#{1,3}[ \t]/m)[0] ?? '';
   for (const line of publicSection.split(/\r?\n/)) {
-    if (!/:white_check_mark:|✅|\bworking\b/i.test(line)) continue;
-    const match = line.match(/\[[^\]]+\]\((https:\/\/[-a-zA-Z0-9.]+)\/?\)/);
+    // Only the first URL column of a table row is an instance. Prose such as
+    // "working right now, see nitter-status" is not a feed server.
+    const match = line.match(/^\|\s*\[[^\]]+\]\((https:\/\/[-a-zA-Z0-9.]+)\/?\)\s*\|\s*([^|]+)\|\s*([^|]+)\|/);
     if (!match?.[1]) continue;
+    if (![match[2], match[3]].every(cell => /^(?::white_check_mark:|✅|✔️?|working)$/i.test(cell!.trim()))) continue;
     const url = match[1].replace(/\/$/, '');
     if (seen.has(url)) continue;
     seen.add(url);
@@ -70,6 +76,7 @@ export function parseInstanceRegistry(markdown: string): string[] {
 }
 
 export function parseNitterRss(xml: string, sourceId: string): MonitoredPost[] {
+  if (XMLValidator.validate(xml) !== true) return [];
   const parser = new XMLParser({ ignoreAttributes: false, processEntities: true });
   const document = parser.parse(xml) as { rss?: { channel?: { item?: RssItem | RssItem[] } } };
   const rawItems = document.rss?.channel?.item;
@@ -126,6 +133,7 @@ export class PublicRssSource implements PostSource {
   private readonly registryUrl: string;
   private readonly requestTimeoutMs: number;
   private readonly maxInstancesPerCheck: number;
+  private readonly preferredInstances: readonly string[];
   private cachedInstances: string[] | null = null;
 
   constructor(options: PublicRssSourceOptions = {}) {
@@ -133,39 +141,51 @@ export class PublicRssSource implements PostSource {
     this.registryUrl = options.registryUrl ?? INSTANCE_REGISTRY;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 5_000;
     this.maxInstancesPerCheck = options.maxInstancesPerCheck ?? 5;
+    this.preferredInstances = options.preferredInstances ?? PREFERRED_INSTANCES;
   }
 
   async check(context: CheckContext): Promise<SourceCheckResult> {
     const startedAt = Date.now();
-    const candidates = await this.instances(context.signal);
-    const ordered = [...new Set([
-      ...(this.lastWorkingInstance ? [this.lastWorkingInstance] : []),
-      ...candidates,
-      ...FALLBACK_INSTANCES,
-    ])].slice(0, this.maxInstancesPerCheck);
-
-    for (const instance of ordered) {
-      try {
-        const response = await this.fetchWithTimeout(
-          `${instance}/thsottiaux/with_replies/rss`,
-          context.signal,
-          { headers: { 'user-agent': 'Tibo-Watch/0.1 (+desktop monitor)' } },
-        );
-        if (!response.ok) continue;
-        const posts = parseNitterRss(await response.text(), this.id);
-        if (posts.length === 0) continue;
-        this.lastWorkingInstance = instance;
-        return {
-          sourceId: this.id,
-          checkedAt: context.checkedAt,
-          state: 'online',
-          posts,
-          latencyMs: Date.now() - startedAt,
-          errorCode: null,
-        };
-      } catch (error) {
-        if (context.signal.aborted) throw error;
+    context.signal.throwIfAborted();
+    const tried = new Set<string>();
+    const tryInstances = async (instances: readonly string[]): Promise<SourceCheckResult | null> => {
+      for (const instance of instances) {
+        context.signal.throwIfAborted();
+        if (tried.size >= this.maxInstancesPerCheck) break;
+        if (tried.has(instance)) continue;
+        tried.add(instance);
+        try {
+          const response = await this.fetchWithTimeout(
+            `${instance}/thsottiaux/with_replies/rss`,
+            context.signal,
+            { headers: { 'user-agent': 'Tibo-Watch/0.1 (+desktop monitor)' }, credentials: 'omit', cache: 'no-store', redirect: 'manual' },
+          );
+          if (!response.ok) { await response.body?.cancel(); continue; }
+          const posts = parseNitterRss(await response.text(), this.id);
+          if (posts.length === 0) continue;
+          this.lastWorkingInstance = instance;
+          return {
+            sourceId: this.id,
+            checkedAt: context.checkedAt,
+            state: 'online',
+            posts,
+            latencyMs: Date.now() - startedAt,
+            errorCode: null,
+          };
+        } catch (error) {
+          if (context.signal.aborted) throw error;
+        }
       }
+      return null;
+    };
+
+    const preferred = await tryInstances([
+      ...(this.lastWorkingInstance ? [this.lastWorkingInstance] : []), ...this.preferredInstances,
+    ]);
+    if (preferred) return preferred;
+    if (tried.size < this.maxInstancesPerCheck) {
+      const discovered = await tryInstances([...(await this.instances(context.signal)), ...FALLBACK_INSTANCES]);
+      if (discovered) return discovered;
     }
 
     return {
@@ -192,8 +212,9 @@ export class PublicRssSource implements PostSource {
     } catch (error) {
       if (signal.aborted) throw error;
     }
-    this.cachedInstances = FALLBACK_INSTANCES;
-    return this.cachedInstances;
+    // A temporary registry failure must not poison discovery for this entire
+    // process lifetime. Reattempt it on a later check when needed.
+    return [];
   }
 
   private fetchWithTimeout(

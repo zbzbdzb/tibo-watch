@@ -22,7 +22,8 @@ test('rendered collection states stay distinct in overview, details and settings
   if (!address || typeof address === 'string') throw new Error('Missing test server');
   const browser = await chromium.launch({ ...(process.env.TIBO_WATCH_CHROMIUM ? { executablePath: process.env.TIBO_WATCH_CHROMIUM } : {}) });
   try {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const page = await browser.newPage({ viewport: { width: 1536, height: 1024 }, reducedMotion: 'reduce' });
+    const active = page.locator('.page-view:not([hidden])');
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
@@ -53,20 +54,20 @@ test('rendered collection states stay distinct in overview, details and settings
     await page.goto(url);
     await expect(page).toHaveURL(url);
     await expect(page).toHaveTitle(/Tibo Watch/);
-    await expect(page.getByText('同步中', { exact: true })).toBeVisible();
-    const warning = page.getByText('同步中', { exact: true });
+    await expect(active.getByText('同步中', { exact: true })).toBeVisible();
+    const warning = active.getByText('同步中', { exact: true });
     for (const theme of ['dark', 'light']) {
       if (theme === 'light') await page.getByRole('button', { name: '切换到浅色模式' }).click();
       expect(await warning.evaluate((node) => getComputedStyle(node).color)).not.toBe(
-        await page.getByText('采集异常', { exact: true }).evaluate((node) => getComputedStyle(node).color));
+        await active.getByText('采集异常', { exact: true }).evaluate((node) => getComputedStyle(node).color));
       await page.screenshot({ path: join(tmpdir(), `tibo-watch-0.2.16-status-${theme}.png`) });
     }
     await page.getByRole('button', { name: '查看详细状态' }).click();
-    await expect(page.getByText(/帖子页尚未加载完成/)).toBeVisible();
-    await expect(page.getByText('运行扩展：0.2.16 · 采集器：1')).toBeVisible();
-    await expect(page.getByText('目前仅识别到置顶帖，尚未确认后续时间线')).toBeVisible();
-    expect(await page.getByText('同步中', { exact: true }).evaluate(node => getComputedStyle(node).color)).toBe('rgb(137, 89, 0)');
-    expect(await page.getByText('采集异常', { exact: true }).evaluate(node => getComputedStyle(node).color)).toBe('rgb(180, 35, 50)');
+    await expect(active.getByText(/帖子页尚未加载完成/)).toBeVisible();
+    await expect(active.getByText('运行扩展：0.2.16 · 采集器：1')).toBeVisible();
+    await expect(active.getByText('目前仅识别到置顶帖，尚未确认后续时间线')).toBeVisible();
+    expect(await active.getByText('同步中', { exact: true }).evaluate(node => getComputedStyle(node).color)).toBe('rgb(158, 102, 9)');
+    expect(await active.getByText('采集异常', { exact: true }).evaluate(node => getComputedStyle(node).color)).toBe('rgb(184, 76, 70)');
     for (const [state, code, label] of [
       ['partial', 'X_COLLECTION_DETAILS_PENDING', '部分采集完成'],
       ['error', 'X_COLLECTION_POSTS_LOADING_INCOMPLETE', '采集未完成'],
@@ -78,16 +79,28 @@ test('rendered collection states stay distinct in overview, details and settings
       await page.evaluate(([state, code]) => {
         (window as unknown as { setTestState: (state: string, code: string) => void }).setTestState(state!, code!);
       }, [state, code]);
-      await expect(page.getByText(label!, { exact: true })).toBeVisible();
+      await expect(active.getByText(label!, { exact: true })).toBeVisible();
       if (state === 'error') {
         await page.setViewportSize({ width: 1080, height: 720 });
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-        expect(await page.locator('.source-grid section').evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth))).toBe(true);
+        expect(await page.locator('.source-card').evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth))).toBe(true);
         await page.screenshot({ path: join(tmpdir(), 'tibo-watch-0.2.16-status-details.png') });
       }
     }
-    await page.getByRole('button', { name: '设置', exact: true }).click();
-    await expect(page.locator('.login-status').getByText('在线', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '总览', exact: true }).click();
+    await expect(active.getByText('在线', { exact: true })).toBeVisible();
+    for (const size of [{width:1536,height:1024},{width:1080,height:720},{width:390,height:844}]) {
+      await page.setViewportSize(size);
+      for (const name of ['总览','动态收件箱','数据源','通知','设置']) {
+        await page.getByRole('navigation',{name:'主导航'}).getByRole('button',{name,exact:true}).click();
+        expect(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      }
+    }
+    await page.getByRole('navigation',{name:'主导航'}).getByRole('button',{name:'动态收件箱',exact:true}).click();
+    await expect(page.getByRole('button',{name:'返回动态列表'})).toBeVisible();
+    await page.screenshot({path:join(process.env.TIBO_WATCH_SCREENSHOT_DIR ?? tmpdir(),'production-mobile-inbox.png')});
+    await page.getByRole('button',{name:'返回动态列表'}).click();
+    await expect(page.getByRole('tab')).toHaveCount(4);
     expect(errors).toEqual([]);
   } finally {
     await browser.close();

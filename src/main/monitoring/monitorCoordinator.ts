@@ -161,6 +161,7 @@ export class MonitorCoordinator {
 
 function classificationInputHash(post: MonitoredPost, classifierId: string): string {
   const canonicalInput = JSON.stringify({
+    authorHandle: post.authorHandle,
     text: post.text,
     quotedText: post.quotedText,
     kind: post.kind,

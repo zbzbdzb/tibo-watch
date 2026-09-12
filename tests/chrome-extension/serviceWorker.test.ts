@@ -1,3 +1,5 @@
+import { setImmediate as nextEventLoopTurn } from 'node:timers/promises';
+
 import { JSDOM } from 'jsdom';
 
 type Post = { id: string; text: string; [key: string]: unknown };
@@ -17,7 +19,12 @@ const LAST_SCAN_KEY = 'tiboWatchLastCompletedScanV2';
 async function loadWorker(): Promise<WorkerModule> {
   const url = new URL('../../chrome-extension/service-worker.js', import.meta.url);
   url.searchParams.set('test', `${Date.now()}-${Math.random()}`);
-  return import(url.href) as Promise<WorkerModule>;
+  const worker = await import(url.href) as WorkerModule;
+  // Chrome dispatches startup/alarm events as separate tasks. Let bootstrap's
+  // microtasks settle first; do not depend on the test runner's import timing
+  // or advance the fake collection timers used by the lifecycle assertions.
+  await nextEventLoopTurn();
+  return worker;
 }
 
 function article(id = '301', text = 'Codex limits reset now.', extra = '', author = 'thsottiaux') {

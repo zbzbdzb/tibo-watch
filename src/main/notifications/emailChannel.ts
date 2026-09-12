@@ -9,6 +9,7 @@ import { buildEmailMessage, emailSettingsSchema } from './email';
 export interface EmailChannelOptions {
   database: AppDatabase;
   getPassword: () => string | null;
+  getSocket?: SMTPTransport.Options['getSocket'];
   createTransport?: (options: SMTPTransport.Options) => Transporter<SMTPTransport.SentMessageInfo>;
 }
 export interface RecipientOutcome { recipient: string; accepted: boolean; errorCode: string | null }
@@ -18,10 +19,12 @@ export class EmailChannel implements DeliveryChannel {
   private readonly database: AppDatabase;
   private readonly getPassword: EmailChannelOptions['getPassword'];
   private readonly createTransport: NonNullable<EmailChannelOptions['createTransport']>;
+  private readonly getSocket: EmailChannelOptions['getSocket'];
 
   constructor(options: EmailChannelOptions) {
     this.database = options.database;
     this.getPassword = options.getPassword;
+    this.getSocket = options.getSocket;
     this.createTransport = options.createTransport ?? ((config) => nodemailer.createTransport(config));
   }
 
@@ -56,6 +59,7 @@ export class EmailChannel implements DeliveryChannel {
       const config = emailSettingsSchema.parse({ host: settings.smtpHost, port: settings.smtpPort, secure: settings.smtpSecure, username: settings.smtpUsername, from: settings.smtpFrom, recipients: normalized });
       transporter = this.createTransport({
         host: config.host, port: config.port, secure: config.secure, requireTLS: !config.secure,
+        ...(this.getSocket ? {getSocket:this.getSocket} : {}),
         auth: { user: config.username, pass: password },
         connectionTimeout: 15_000, greetingTimeout: 15_000, socketTimeout: 20_000,
         logger: false, debug: false,
@@ -77,6 +81,12 @@ export class EmailChannel implements DeliveryChannel {
 function normalizeAddress(value: string | { address: string }): string { return (typeof value === 'string' ? value : value.address).trim().toLowerCase(); }
 function rejected(recipients: string[], errorCode: string): RecipientOutcome[] { return recipients.map((recipient) => ({ recipient, accepted: false, errorCode })); }
 function safeSmtpError(error: unknown): string {
+  if(error instanceof Error && 'code' in error) {
+    const code=String(error.code);
+    if(['EMAIL_PROXY_TIMEOUT','EMAIL_PROXY_RESOLUTION_FAILED','EMAIL_PROXY_UNAVAILABLE','EMAIL_PROXY_AUTH_REQUIRED','EMAIL_PROXY_UNSUPPORTED','EMAIL_SERVER_INVALID'].includes(code))return code;
+    if(code==='ETIMEDOUT')return /greeting/i.test(error.message)?'EMAIL_GREETING_TIMEOUT'
+      : 'command' in error && error.command==='CONN'?'EMAIL_CONNECTION_TIMEOUT':'EMAIL_SEND_TIMEOUT';
+  }
   const allowed = new Set(['EAUTH', 'ECONNECTION', 'ECONNREFUSED', 'ETIMEDOUT', 'ESOCKET', 'EENVELOPE', 'EMESSAGE', 'EDNS', 'EPROTOCOL']);
   const code = error instanceof Error && 'code' in error ? String(error.code) : '';
   return allowed.has(code) ? code : 'SMTP_SEND_FAILED';

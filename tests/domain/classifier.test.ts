@@ -420,11 +420,11 @@ describe('rule classifier', () => {
     expect(result.matchedTerms).not.toContain('tomorrow');
   });
 
-  it('reports the v8 classifier identifiers', async () => {
+  it('reports the v9 classifier identifiers', async () => {
     const result = await classifyPost({ post: postFixture('Codex usage limits have been reset.') });
 
-    expect(result.classifierVersion).toBe('rules-v8');
-    expect(new RuleClassifier().id).toBe('local-rules-v8');
+    expect(result.classifierVersion).toBe('rules-v9');
+    expect(new RuleClassifier().id).toBe('local-rules-v9');
   });
 });
 
