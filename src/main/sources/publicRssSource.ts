@@ -2,12 +2,9 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import type { CheckContext, MonitoredPost, PostSource, SourceCheckResult } from '../../shared/domain';
 
-const INSTANCE_REGISTRY =
-  'https://raw.githubusercontent.com/wiki/zedeus/nitter/Instances.md';
-const FALLBACK_INSTANCES = ['https://nitter.privacyredirect.com'];
-// Verified with the application's parser on 2026-09-12. The community
-// registry can lag behind working instances, so try this before discovery.
-const PREFERRED_INSTANCES = ['https://nitter.perennialte.ch'];
+// Only the selected public mirrors are used by default. Registry discovery is
+// opt-in so it cannot silently bring back a previously replaced instance.
+const PREFERRED_INSTANCES = ['https://nitter.kareem.one', 'https://nitter.meowing.monster'];
 
 interface RssItem {
   title?: string;
@@ -130,7 +127,7 @@ export class PublicRssSource implements PostSource {
   lastWorkingInstance: string | null = null;
 
   private readonly fetcher: typeof fetch;
-  private readonly registryUrl: string;
+  private readonly registryUrl: string | undefined;
   private readonly requestTimeoutMs: number;
   private readonly maxInstancesPerCheck: number;
   private readonly preferredInstances: readonly string[];
@@ -138,8 +135,9 @@ export class PublicRssSource implements PostSource {
 
   constructor(options: PublicRssSourceOptions = {}) {
     this.fetcher = options.fetcher ?? fetch;
-    this.registryUrl = options.registryUrl ?? INSTANCE_REGISTRY;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 5_000;
+    this.registryUrl = options.registryUrl;
+    // Both selected feeds needed 8–11 seconds on a cold system-proxy request.
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
     this.maxInstancesPerCheck = options.maxInstancesPerCheck ?? 5;
     this.preferredInstances = options.preferredInstances ?? PREFERRED_INSTANCES;
   }
@@ -183,8 +181,8 @@ export class PublicRssSource implements PostSource {
       ...(this.lastWorkingInstance ? [this.lastWorkingInstance] : []), ...this.preferredInstances,
     ]);
     if (preferred) return preferred;
-    if (tried.size < this.maxInstancesPerCheck) {
-      const discovered = await tryInstances([...(await this.instances(context.signal)), ...FALLBACK_INSTANCES]);
+    if (this.registryUrl && tried.size < this.maxInstancesPerCheck) {
+      const discovered = await tryInstances(await this.instances(context.signal));
       if (discovered) return discovered;
     }
 
@@ -199,6 +197,7 @@ export class PublicRssSource implements PostSource {
   }
 
   private async instances(signal: AbortSignal): Promise<string[]> {
+    if (!this.registryUrl) return [];
     if (this.cachedInstances) return this.cachedInstances;
     try {
       const response = await this.fetchWithTimeout(this.registryUrl, signal);

@@ -1,5 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { PACIFIC_ZONE, BEIJING_ZONE, dayDifference, differenceLabel, localDateTime, offsetLabel, resolveLocalTime, utcOffsetMinutes } from '../../src/renderer/timeZones';
+import { PACIFIC_ZONE, BEIJING_ZONE, dayDifference, differenceLabel, localDateTime, offsetLabel, resolveLocalTime, utcOffsetMinutes, zoneTimeLabel } from '../../src/renderer/timeZones';
+
+describe('fixed PST conversion', () => {
+  it.each([
+    ['2026-10-02T10:00', '2026-10-02T18:00:00.000Z', '2026-10-03T02:00'],
+    ['2026-01-02T10:00', '2026-01-02T18:00:00.000Z', '2026-01-03T02:00'],
+    ['2026-03-08T02:30', '2026-03-08T10:30:00.000Z', '2026-03-08T18:30'],
+    ['2026-11-01T01:30', '2026-11-01T09:30:00.000Z', '2026-11-01T17:30'],
+  ])('keeps %s on UTC-8 without seasonal gaps or folds', (local, utc, beijing) => {
+    const result = resolveLocalTime(local, 'Etc/GMT+8');
+    expect(result.kind).toBe('valid');
+    expect(result.instants.map(instant => new Date(instant).toISOString())).toEqual([utc]);
+    expect(localDateTime(result.instants[0]!, BEIJING_ZONE)).toBe(beijing);
+    expect(zoneTimeLabel(result.instants[0]!, 'Etc/GMT+8')).toBe('PST · UTC−08:00');
+  });
+});
 
 describe('IANA time-zone conversion', () => {
   it.each([

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AppSnapshot, SettingsUpdate } from '../../shared/api';
+import type { AppSnapshot, CheckSourceId, CheckTarget, SettingsUpdate } from '../../shared/api';
 import { demoSnapshot, emptySnapshot } from '../demoData';
 import type { PageId, Theme } from './model';
 const THEME_KEY = 'tibo-watch-theme';
@@ -15,7 +15,7 @@ export function useApplication() {
   const [theme, setTheme] = useState(initialTheme);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
-  const [checkPending, setCheckPending] = useState(false);
+  const [checkPending, setCheckPending] = useState<CheckTarget | null>(null);
   const actionLock = useRef(false);
   const checkLock = useRef(false);
   const notify = useCallback((text: string) => setMessage(text), []);
@@ -42,16 +42,17 @@ export function useApplication() {
     setSnapshot(current => ({ ...current, settings: { ...current.settings, ...settings, hasSmtpPassword: Boolean(smtpPassword) || current.settings.hasSmtpPassword } }));
     notify('浏览器演示：未修改桌面配置'); return true;
   }
-  async function check() {
+  async function check(sourceId?: CheckSourceId) {
     if (checkLock.current || snapshot.checking) return;
-    checkLock.current = true; setCheckPending(true);
+    checkLock.current = true; setCheckPending(sourceId ?? 'all');
     const started = Date.now();
     try {
       if (!api) { notify('浏览器演示：未执行真实检查'); return; }
-      const next = await api.checkNow(); setSnapshot(next);
-      notify(next.lastCheckError ? '检查未完成，请查看数据源详情' : '检查完成，请查看最新采集状态');
+      const next = await (sourceId === undefined ? api.checkNow() : api.checkNow(sourceId)); setSnapshot(next);
+      const failed = sourceId === undefined ? next.lastCheckError : next.sourceHealth.some(source => source.sourceId === sourceId && ['error', 'stale', 'needs_login', 'needs_extension'].includes(source.state));
+      notify(failed ? '检查未完成，请查看数据源详情' : '检查完成，请查看最新采集状态');
     } catch { notify('检查失败，请检查数据源连接后重试。'); }
-    finally { await new Promise(resolve => setTimeout(resolve, Math.max(0, 650 - (Date.now() - started)))); checkLock.current = false; setCheckPending(false); }
+    finally { await new Promise(resolve => setTimeout(resolve, Math.max(0, 650 - (Date.now() - started)))); checkLock.current = false; setCheckPending(null); }
   }
   async function openPost(url: string) {
     try { if (api) await api.openPost(url); else window.open(url, '_blank', 'noopener,noreferrer'); }
@@ -61,5 +62,6 @@ export function useApplication() {
     if (api) await action(() => api.setPaused(!snapshot.paused), snapshot.paused ? '已恢复监测' : '已暂停监测');
     else setSnapshot(current => ({ ...current, paused: !current.paused }));
   }
-  return { api, snapshot, loaded, loadError, page, navigate, selectedId, select, theme, setTheme, message, notify, busy, checking: checkPending || snapshot.checking, save, action, check, openPost, pause };
+  const checkingTarget = snapshot.checking ? snapshot.checkingTarget ?? 'all' : checkPending;
+  return { api, snapshot, loaded, loadError, page, navigate, selectedId, select, theme, setTheme, message, notify, busy, checking: checkingTarget !== null, checkingTarget, checkingAll: checkingTarget === 'all', save, action, check, openPost, pause };
 }

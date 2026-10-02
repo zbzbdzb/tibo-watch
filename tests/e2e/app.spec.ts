@@ -75,6 +75,56 @@ test.describe.serial('Tibo Watch production redesign', () => {
    expect(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().length)).toBe(1);
  });
 
+ test('checks each source without animating other controls or updating their results', async () => {
+   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1536, 1024));
+   await nav('数据源');
+   const chrome = page.locator('.source-card').filter({ has: page.getByRole('heading', { name: 'Chrome 登录共享', exact: true }) });
+   const rss = page.locator('.source-card').filter({ has: page.getByRole('heading', { name: '公共 RSS', exact: true }) });
+   for (const [target, other, otherId] of [[chrome, rss, 'public-rss'], [rss, chrome, 'x-browser']] as const) {
+     const before = await page.evaluate(async id => (await window.tiboWatch!.getSnapshot()).sourceHealth.find(source => source.sourceId === id), otherId);
+     await target.getByRole('button', { name: '检查连接', exact: true }).click();
+     await expect(target.getByRole('button', { name: '正在检查…' })).toBeDisabled();
+     await expect(other.getByRole('button', { name: '检查连接', exact: true })).toBeDisabled();
+     await expect(other.locator('.spin')).toHaveCount(0);
+     await expect(page.getByRole('button', { name: '检查全部来源' })).toBeDisabled();
+     await expect(page.locator('.page-sources .page-view:not([hidden]) .spin')).toHaveCount(1);
+     if (otherId === 'public-rss') {
+       const notice = page.getByRole('button', { name: '关闭提示' });
+       if (await notice.count()) await notice.click();
+       await page.screenshot({ path: join(output, 'source-chrome-check-only.png'), scale: 'css' });
+     }
+     await expect(target.getByRole('button', { name: '检查连接', exact: true })).toBeEnabled();
+     await expect(other.getByRole('button', { name: '检查连接', exact: true })).toBeEnabled();
+     expect(await page.evaluate(async id => (await window.tiboWatch!.getSnapshot()).sourceHealth.find(source => source.sourceId === id), otherId)).toEqual(before);
+   }
+   await page.getByRole('button', { name: '检查全部来源' }).click();
+   await expect(page.locator('.page-sources .page-view:not([hidden]) .spin')).toHaveCount(1);
+   await expect(chrome.getByRole('button', { name: '检查连接', exact: true })).toBeDisabled();
+   await expect(rss.getByRole('button', { name: '检查连接', exact: true })).toBeDisabled();
+   await expect(page.getByRole('button', { name: '检查全部来源' })).toBeEnabled();
+ });
+
+ test('keeps Beijing and fixed PST post timestamps readable on desktop and narrow windows', async () => {
+   await nav('动态收件箱');
+   const notice = page.getByRole('button', { name: '关闭提示' });
+   if (await notice.count()) await notice.click();
+   const times = page.locator('.author-line time');
+   await expect(times).toHaveCount(2);
+   await expect(times.nth(0)).toContainText('北京时间');
+   await expect(times.nth(1)).toContainText('PST（UTC−8）');
+   expect(await times.nth(0).getAttribute('datetime')).toBe(await times.nth(1).getAttribute('datetime'));
+   for (const [width, height] of [[1536, 1024], [1080, 720]]) {
+     await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]!.setSize(size.width, size.height), { width, height });
+     await expect(times.nth(1)).toBeVisible();
+     const bounds = await times.evaluateAll(nodes => nodes.map(node => ({ x: node.getBoundingClientRect().x, y: node.getBoundingClientRect().y, right: node.getBoundingClientRect().right, bottom: node.getBoundingClientRect().bottom })));
+     expect(bounds[1]!.y >= bounds[0]!.bottom - 1 || bounds[1]!.x >= bounds[0]!.right).toBe(true);
+     expect(await page.locator('.reader-scroll').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+     await page.screenshot({ path: join(output, `post-dual-time-${width}.png`), scale: 'css' });
+   }
+   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1440, 900));
+ });
+
  test('separates notification and SMTP saves; validates email and preserves encrypted password', async () => {
    await nav('通知');
    await page.getByRole('button',{name:'添加',exact:true}).click();
@@ -110,15 +160,15 @@ test.describe.serial('Tibo Watch production redesign', () => {
    // Never click send-test-email: this test must not send mail.
  });
 
- test('converts Pacific time in Electron without changing application settings', async () => {
+ test('defaults to fixed PST conversion in Electron without changing application settings', async () => {
    const before = await page.evaluate(async () => (await window.tiboWatch!.getSnapshot()).settings);
    await nav('设置');
    await expect(page.getByText('显示时间', { exact: true })).toHaveCount(0);
    await page.getByRole('button', { name: '时区换算', exact: true }).click();
    await page.getByLabel('来源日期', { exact: true }).fill('2026-09-12');
    await page.getByLabel('来源时间', { exact: true }).fill('14:00');
-   await expect(page.getByLabel('换算结果', { exact: true })).toContainText('2026-09-13 05:00');
-   await expect(page.getByLabel('换算结果', { exact: true })).toContainText('PDT');
+   await expect(page.getByLabel('换算结果', { exact: true })).toContainText('2026-09-13 06:00');
+   await expect(page.getByLabel('换算结果', { exact: true })).toContainText('PST');
    await page.getByRole('button', { name: '交换来源与目标时区' }).click();
    await expect(page.getByLabel('换算结果', { exact: true })).toContainText('2026-09-12 14:00');
    await page.getByRole('button', { name: '交换来源与目标时区' }).click();

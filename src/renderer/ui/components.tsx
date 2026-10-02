@@ -18,8 +18,8 @@ export function Status({ kind = 'online', children }: { kind?: 'online' | 'warni
 export function Toggle({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: () => void; label: string; disabled?: boolean }) {
   return <button className="toggle" type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} onClick={onChange}><span/></button>;
 }
-export function CheckButton({ checking, onClick, label = '立即检查' }: { checking: boolean; onClick: () => void; label?: string }) {
-  return <button className="button" disabled={checking} onClick={onClick}><RefreshCw size={18} className={checking ? 'spin' : ''}/>{checking ? '正在检查…' : label}</button>;
+export function CheckButton({ checking, disabled = false, onClick, label = '立即检查' }: { checking: boolean; disabled?: boolean; onClick: () => void; label?: string }) {
+  return <button className="button" disabled={checking || disabled} onClick={onClick}><RefreshCw size={18} className={checking ? 'spin' : ''}/>{checking ? '正在检查…' : label}</button>;
 }
 export function LinkButton({ children, onClick }: { children: ReactNode; onClick: () => void }) {
   return <button className="text-button" onClick={onClick}>{children}<ArrowRight size={17}/></button>;

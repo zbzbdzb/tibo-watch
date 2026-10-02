@@ -1,6 +1,8 @@
 import type { ClassificationResult, DeliveryStatusView, MonitoredPost, SignalEvent, SourceState } from './domain';
 import type { ChromePageDiagnostic } from './chromeDiagnostics';
 export type { DeliveryStatusView } from './domain';
+export type CheckSourceId = 'x-browser' | 'public-rss';
+export type CheckTarget = 'all' | CheckSourceId;
 
 export interface RendererSettings {
   pollIntervalMinutes: number;
@@ -62,6 +64,7 @@ export interface AppSnapshot {
   lastCheckError: string | null;
   paused: boolean;
   checking: boolean;
+  checkingTarget?: CheckTarget | null;
   xLoggedIn: boolean;
   lastCheckedAt: string | null;
   nextCheckAt: string | null;
@@ -75,7 +78,7 @@ export interface SettingsUpdate extends Partial<Omit<RendererSettings, 'hasSmtpP
 export interface TiboWatchApi {
   getSnapshot(): Promise<AppSnapshot>;
   updateSettings(update: SettingsUpdate): Promise<AppSnapshot>;
-  checkNow(): Promise<AppSnapshot>;
+  checkNow(sourceId?: CheckSourceId): Promise<AppSnapshot>;
   setPaused(paused: boolean): Promise<AppSnapshot>;
   openXLogin(): Promise<AppSnapshot>;
   logoutX(): Promise<AppSnapshot>;

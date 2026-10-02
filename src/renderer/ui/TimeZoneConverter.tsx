@@ -1,14 +1,14 @@
 import { memo, useMemo, useState } from 'react';
 import { ArrowLeftRight, Clock3, Globe2 } from 'lucide-react';
-import { BEIJING_ZONE, COMMON_ZONES, OTHER_ZONES, PACIFIC_ZONE, dayDifference, differenceLabel, localDateTime, resolveLocalTime, utcOffsetMinutes, zoneLabel, zoneTimeLabel } from '../timeZones';
+import { BEIJING_ZONE, COMMON_ZONES, OTHER_ZONES, PST_ZONE, dayDifference, differenceLabel, localDateTime, resolveLocalTime, utcOffsetMinutes, zoneLabel, zoneTimeLabel } from '../timeZones';
 
 function ZoneOptions() {
   return <><optgroup label="常用时区">{COMMON_ZONES.map(zone => <option key={zone.id} value={zone.id}>{zone.label}</option>)}</optgroup><optgroup label="其他时区（城市 / 地区）">{OTHER_ZONES.map(zone => <option key={zone} value={zone}>{zone.replaceAll('_', ' ')}</option>)}</optgroup></>;
 }
 export const TimeZoneConverter = memo(function TimeZoneConverter() {
-  const [source, setSource] = useState(PACIFIC_ZONE);
+  const [source, setSource] = useState(PST_ZONE);
   const [target, setTarget] = useState(BEIJING_ZONE);
-  const [local, setLocal] = useState(() => localDateTime(Date.now(), PACIFIC_ZONE));
+  const [local, setLocal] = useState(() => localDateTime(Date.now(), PST_ZONE));
   const [occurrence, setOccurrence] = useState('');
   const resolution = useMemo(() => resolveLocalTime(local, source), [local, source]);
   const repeated = resolution.kind === 'valid' && resolution.instants.length > 1;
@@ -29,7 +29,7 @@ export const TimeZoneConverter = memo(function TimeZoneConverter() {
     setSource(target); setTarget(source);
   }
   return <section className="panel settings-panel timezone-panel" aria-labelledby="timezone-heading">
-    <div className="panel-heading"><Globe2/><div><h2 id="timezone-heading">时区换算</h2><p>按所选日期自动处理夏令时。</p></div></div>
+    <div className="panel-heading"><Globe2/><div><h2 id="timezone-heading">时区换算</h2><p>默认 PST（UTC−8）；城市时区按所选日期处理夏令时。</p></div></div>
     <div className="timezone-zones">
       <label className="field">来源时区<select aria-label="来源时区" value={source} onChange={event => { setSource(event.target.value); setOccurrence(''); }}><ZoneOptions/></select><small>{source}</small></label>
       <button className="icon-button timezone-swap" aria-label="交换来源与目标时区" disabled={instant === null} onClick={swap}><ArrowLeftRight size={20}/></button>

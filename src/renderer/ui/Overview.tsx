@@ -5,8 +5,8 @@ import { selectCurrentSignal } from '../currentSignal';
 import { deliveryLabel, deliveryTone, latestDelivery } from '../deliveryStatus';
 import { CheckButton, Empty, FilterTabs, LinkButton, Mark, PostRow, SourceStatus, Status } from './components';
 import { filteredPosts, formatDay, formatTime, healthFor, type Filter, type PageId } from './model';
-interface Props { snapshot: AppSnapshot; checking: boolean; busy: boolean; onCheck: () => void; onPause: () => void; navigate: (page: PageId) => void; onSelect: (post: PostView) => void }
-export function Overview({ snapshot, checking, busy, onCheck, onPause, navigate, onSelect }: Props) {
+interface Props { snapshot: AppSnapshot; checking: boolean; checkDisabled?: boolean; busy: boolean; onCheck: () => void; onPause: () => void; navigate: (page: PageId) => void; onSelect: (post: PostView) => void }
+export function Overview({ snapshot, checking, checkDisabled, busy, onCheck, onPause, navigate, onSelect }: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [now, setNow] = useState(Date.now);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 60_000); return () => clearInterval(timer); }, []);
@@ -21,7 +21,7 @@ export function Overview({ snapshot, checking, busy, onCheck, onPause, navigate,
   const channels = [snapshot.settings.windowsConfirmedEnabled, snapshot.settings.windowsPreviewEnabled, snapshot.settings.windowsRelatedEnabled];
   const mail = latestDelivery(snapshot.deliveries, 'email');
   return <>
-    <div className="page-heading"><div><h1>监测总览</h1></div><div className="heading-actions"><span className="calendar-date">{formatDay(new Date(now).toISOString())}</span><CheckButton checking={checking} onClick={onCheck}/></div></div>
+    <div className="page-heading"><div><h1>监测总览</h1></div><div className="heading-actions"><span className="calendar-date">{formatDay(new Date(now).toISOString())}</span><CheckButton checking={checking} disabled={checkDisabled ?? false} onClick={onCheck}/></div></div>
     <section className={`monitor-banner ${snapshot.paused ? 'paused' : current ? level : offline || disabled ? 'outage' : 'monitoring'}`} aria-label="当前监测状态">
       <div className="monitor-symbol">{!current && (offline || disabled) ? <TriangleAlert size={46}/> : <Mark large/>}</div><div className="monitor-copy"><span className="monitor-label">{snapshot.paused ? '监测已暂停' : current ? level === 'confirmed' ? '已确认重置' : '重置预告' : disabled ? '未启用数据源' : offline ? '需要留意' : '监测中'}</span><h2>{title}</h2><p title={subtitle}>{subtitle}</p><div className="monitor-times"><span>最近检查 <time>{formatTime(snapshot.lastCheckedAt)}</time></span><span>下次检查 {snapshot.paused ? '已暂停' : formatTime(snapshot.nextCheckAt)}</span><span>每 {snapshot.settings.pollIntervalMinutes} 分钟</span>{current ? <button className="text-button" onClick={() => onSelect(current)}>查看公告</button> : null}</div></div><button className="button banner-action" disabled={busy} onClick={onPause}>{snapshot.paused ? <Play size={17}/> : <Pause size={17}/>}{snapshot.paused ? '恢复监测' : '暂停监测'}</button>
     </section>

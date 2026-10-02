@@ -37,6 +37,7 @@ export class MonitorCoordinator {
   private readonly onSignal: MonitorCoordinatorOptions['onSignal'];
   private readonly onOutage?: MonitorCoordinatorOptions['onOutage'];
   private activeCheck: Promise<CheckSummary> | null = null;
+  private activeSourceId: string | undefined;
 
   constructor(options: MonitorCoordinatorOptions) {
     this.database = options.database;
@@ -47,10 +48,18 @@ export class MonitorCoordinator {
     this.health = new SourceHealthTracker(options.sources.map((source) => source.id));
   }
 
-  checkNow(checkedAt = new Date().toISOString()): Promise<CheckSummary> {
-    if (this.activeCheck) return this.activeCheck;
-    this.activeCheck = this.performCheck(checkedAt).finally(() => {
+  checkNow(checkedAt = new Date().toISOString(), sourceId?: string): Promise<CheckSummary> {
+    if (sourceId !== undefined && !this.sources.some(source => source.id === sourceId)) {
+      return Promise.reject(new Error(`Unknown source: ${sourceId}`));
+    }
+    if (this.activeCheck) {
+      if (this.activeSourceId === undefined || this.activeSourceId === sourceId) return this.activeCheck;
+      return this.activeCheck.then(() => this.checkNow(checkedAt, sourceId), () => this.checkNow(checkedAt, sourceId));
+    }
+    this.activeSourceId = sourceId;
+    this.activeCheck = this.performCheck(checkedAt, sourceId).finally(() => {
       this.activeCheck = null;
+      this.activeSourceId = undefined;
     });
     return this.activeCheck;
   }
@@ -92,10 +101,10 @@ export class MonitorCoordinator {
     return { postsReclassified, signalsEmitted };
   }
 
-  private async performCheck(checkedAt: string): Promise<CheckSummary> {
+  private async performCheck(checkedAt: string, sourceId?: string): Promise<CheckSummary> {
     const controller = new AbortController();
     const results = await Promise.all(
-      this.sources.map(async (source): Promise<SourceCheckResult> => {
+      this.sources.filter(source => sourceId === undefined || source.id === sourceId).map(async (source): Promise<SourceCheckResult> => {
         try {
           return await source.check({ checkedAt, signal: controller.signal });
         } catch {
@@ -152,7 +161,7 @@ export class MonitorCoordinator {
       this.database.updateSettings({ baselineComplete: true });
     }
 
-    const outageIncident = this.health.consumeOutageIncident();
+    const outageIncident = sourceId === undefined && this.health.consumeOutageIncident();
     if (outageIncident) await this.onOutage?.();
 
     return { checkedAt, postsSeen: posts.length, signalsEmitted, sourceResults: results, outageIncident };

@@ -1,7 +1,11 @@
 export const PACIFIC_ZONE = 'America/Los_Angeles';
+// IANA's Etc/GMT signs are reversed: +8 is fixed UTC-8, not UTC+8.
+export const PST_ZONE = 'Etc/GMT+8';
+export const PDT_ZONE = 'Etc/GMT+7';
 export const BEIJING_ZONE = 'Asia/Shanghai';
 export const COMMON_ZONES = [
-  { id: PACIFIC_ZONE, label: '美西（洛杉矶）' },
+  { id: PST_ZONE, label: 'PST（UTC−8，固定标准时间）' },
+  { id: PACIFIC_ZONE, label: '洛杉矶当地时间（自动夏令时）' },
   { id: BEIJING_ZONE, label: '北京' },
   { id: 'Asia/Hong_Kong', label: '香港' },
   { id: 'America/New_York', label: '美东（纽约）' },
@@ -40,7 +44,8 @@ export function offsetLabel(minutes: number): string {
   return `UTC${minutes < 0 ? '−' : '+'}${String(Math.floor(absolute / 60)).padStart(2, '0')}:${String(absolute % 60).padStart(2, '0')}`;
 }
 export function zoneTimeLabel(instant: number, zone: string): string {
-  const name = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'short' }).formatToParts(instant).find(part => part.type === 'timeZoneName')?.value;
+  const name = zone === PST_ZONE ? 'PST' : zone === PDT_ZONE ? 'PDT'
+    : new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'short' }).formatToParts(instant).find(part => part.type === 'timeZoneName')?.value;
   return `${name ?? zone} · ${offsetLabel(utcOffsetMinutes(instant, zone))}`;
 }
 export type LocalTimeResolution = { kind: 'invalid' | 'gap'; instants: [] } | { kind: 'valid'; instants: number[] };

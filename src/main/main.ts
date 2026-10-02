@@ -8,7 +8,7 @@ import {
 } from 'electron';
 import { z } from 'zod';
 
-import type { AppSnapshot, RendererSettings, SettingsUpdate } from '../shared/api';
+import type { AppSnapshot, CheckSourceId, CheckTarget, RendererSettings, SettingsUpdate } from '../shared/api';
 import type { PostSource } from '../shared/domain';
 import { RuleClassifier } from './classifier/ruleClassifier';
 import { MonitorCoordinator } from './monitoring/monitorCoordinator';
@@ -80,6 +80,7 @@ let lastCheckedAt: string | null = null;
 let nextCheckAt: string | null = null;
 let lastCheckError: string | null = null;
 let runningCheck: Promise<void> | null = null;
+let runningCheckTarget: CheckTarget | null = null;
 let shutdownReady = false;
 let shutdownStarted = false;
 let lastChromeDiagnostic = '';
@@ -258,7 +259,7 @@ function registerIpc(): void {
     restartSchedule();
     return snapshot();
   });
-  handle('app:check-now', z.tuple([]), async () => { await runCheck(); return snapshot(); });
+  handle('app:check-now', z.tuple([z.enum(['x-browser', 'public-rss']).optional()]), async ([sourceId]) => { await runCheck(sourceId); return snapshot(); });
   handle('app:set-paused', z.tuple([z.boolean()]), async ([value]) => { paused = value; restartSchedule(); rebuildTrayMenu(); return snapshot(); });
   handle('app:open-x-login', z.tuple([]), async () => {
     database.updateSettings({ browserSourceEnabled: true });
@@ -314,29 +315,38 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
   if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('Untrusted IPC sender');
 }
 
-function runCheck(): Promise<void> {
-  if (runningCheck) return runningCheck;
+function runCheck(sourceId?: CheckSourceId): Promise<void> {
+  const target = sourceId ?? 'all';
+  if (runningCheck) {
+    if (runningCheckTarget === 'all' || runningCheckTarget === target) return runningCheck;
+    return runningCheck.then(() => runCheck(sourceId), () => runCheck(sourceId));
+  }
   if (paused || quitting) return Promise.resolve();
-  runningCheck = performCheck().finally(() => { runningCheck = null; });
+  runningCheckTarget = target;
+  runningCheck = performCheck(sourceId).finally(() => { runningCheck = null; runningCheckTarget = null; });
   return runningCheck;
 }
 
-async function performCheck(): Promise<void> {
+async function performCheck(sourceId?: CheckSourceId): Promise<void> {
   checking = true;
-  lastCheckError = null;
-  if (scheduleTimer) clearTimeout(scheduleTimer);
-  nextCheckAt = null;
+  if (sourceId === undefined) {
+    lastCheckError = null;
+    if (scheduleTimer) clearTimeout(scheduleTimer);
+    nextCheckAt = null;
+  }
   rebuildTrayMenu();
   try {
     await broadcastSnapshot();
-    lastCheckedAt = new Date().toISOString();
-    await coordinator.checkNow(lastCheckedAt);
+    const checkedAt = new Date().toISOString();
+    if (sourceId === undefined) lastCheckedAt = checkedAt;
+    await coordinator.checkNow(checkedAt, sourceId);
     await deliveryWorker.processDue();
   } catch {
-    lastCheckError = 'CHECK_FAILED';
+    if (sourceId === undefined) lastCheckError = 'CHECK_FAILED';
+    else throw new Error('SOURCE_CHECK_FAILED');
   } finally {
     checking = false;
-    restartSchedule();
+    if (sourceId === undefined || nextCheckAt === null) restartSchedule();
     rebuildTrayMenu();
     await broadcastSnapshot();
   }
@@ -386,6 +396,7 @@ async function snapshot(): Promise<AppSnapshot> {
     lastCheckError,
     paused,
     checking,
+    checkingTarget: checking ? runningCheckTarget : null,
     xLoggedIn: await xSession.isLoggedIn(),
     lastCheckedAt,
     nextCheckAt,

@@ -81,6 +81,23 @@ it('shows complete original and quote, plain explanation, real sources and no in
   expect(api.openPost).toHaveBeenCalledWith(snapshot.posts[0]!.post.url);
 });
 
+it.each([
+  ['2026-10-02T02:14:00Z', '2026-10-02 10:14', '2026-10-01 18:14'],
+  ['2026-01-02T02:14:00Z', '2026-01-02 10:14', '2026-01-01 18:14'],
+  ['2026-03-08T09:59:00Z', '2026-03-08 17:59', '2026-03-08 01:59'],
+  ['2026-03-08T10:00:00Z', '2026-03-08 18:00', '2026-03-08 02:00'],
+])('shows Beijing and fixed PST post times for the same instant %s', async (createdAt, beijing, pacific) => {
+  snapshot.posts[0]!.post.createdAt = createdAt;
+  await start(); nav('动态收件箱');
+  const author = within(document.querySelector('.author-line') as HTMLElement);
+  expect(author.getByText(`${beijing} 北京时间`)).toBeVisible();
+  expect(author.getByText(`${pacific} PST（UTC−8）`)).toBeVisible();
+  const times = document.querySelectorAll('.author-line time');
+  expect(times).toHaveLength(2);
+  expect(times[0]).toHaveTextContent('北京时间');
+  expect(times[1]).toHaveTextContent('PST（UTC−8）');
+});
+
 it('keeps independent Windows sound and channel preferences with scoped persistence', async () => {
   await start(); nav('通知');
   await act(async () => fireEvent.click(screen.getByRole('switch', { name: '确认重置通知' })));
@@ -187,18 +204,20 @@ it('removes requested decorative copy and the non-editable display-time row', as
   }
 });
 
-it('converts Pacific dates, swaps direction, and retains the conversion across navigation without saving settings', async () => {
+it('defaults to fixed PST, swaps direction, and retains conversion across navigation without saving settings', async () => {
   await start(); nav('设置');
   const categories = within(screen.getByRole('navigation', { name: '设置分类' }));
   fireEvent.click(categories.getByRole('button', { name: '时区换算' }));
+  expect(screen.getByLabelText('来源时区')).toHaveValue('Etc/GMT+8');
   fireEvent.change(screen.getByLabelText('来源日期'), { target: { value: '2026-09-12' } });
   fireEvent.change(screen.getByLabelText('来源时间'), { target: { value: '14:00' } });
-  expect(screen.getByLabelText('换算结果')).toHaveTextContent('2026-09-13 05:00');
-  expect(screen.getByLabelText('换算结果')).toHaveTextContent('PDT');
+  expect(screen.getByLabelText('换算结果')).toHaveTextContent('2026-09-13 06:00');
+  expect(screen.getByLabelText('换算结果')).toHaveTextContent('PST');
+  expect(screen.getByLabelText('换算结果')).toHaveTextContent('快 16 小时');
   expect(screen.getByLabelText('换算结果')).toHaveTextContent('次日');
   fireEvent.click(screen.getByRole('button', { name: '交换来源与目标时区' }));
   expect(screen.getByLabelText('来源时区')).toHaveValue('Asia/Shanghai');
-  expect(screen.getByLabelText('目标时区')).toHaveValue('America/Los_Angeles');
+  expect(screen.getByLabelText('目标时区')).toHaveValue('Etc/GMT+8');
   expect(screen.getByLabelText('换算结果')).toHaveTextContent('2026-09-12 14:00');
   expect(screen.getByLabelText('换算结果')).toHaveTextContent('前一日');
   fireEvent.click(categories.getByRole('button', { name: '外观' }));
@@ -206,7 +225,7 @@ it('converts Pacific dates, swaps direction, and retains the conversion across n
   nav('总览'); nav('设置');
   await act(async () => push(structuredClone(snapshot)));
   expect(screen.getByLabelText('来源日期')).toHaveValue('2026-09-13');
-  expect(screen.getByLabelText('来源时间')).toHaveValue('05:00');
+  expect(screen.getByLabelText('来源时间')).toHaveValue('06:00');
   expect(api.updateSettings).not.toHaveBeenCalled();
   expect(api.sendTestEmail).not.toHaveBeenCalled();
 });
@@ -214,6 +233,7 @@ it('converts Pacific dates, swaps direction, and retains the conversion across n
 it('requires a choice for repeated clock times and never displays a guessed gap result', async () => {
   await start(); nav('设置');
   fireEvent.click(screen.getByRole('button', { name: '时区换算' }));
+  fireEvent.change(screen.getByLabelText('来源时区'), { target: { value: 'America/Los_Angeles' } });
   fireEvent.change(screen.getByLabelText('来源日期'), { target: { value: '2026-11-01' } });
   fireEvent.change(screen.getByLabelText('来源时间'), { target: { value: '01:30' } });
   expect(screen.getByLabelText('换算结果')).toHaveTextContent('选择具体时刻');

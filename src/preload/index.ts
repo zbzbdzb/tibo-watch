@@ -5,7 +5,7 @@ import type { AppSnapshot, SettingsUpdate, TiboWatchApi } from '../shared/api';
 const api: TiboWatchApi = {
   getSnapshot: () => ipcRenderer.invoke('app:get-snapshot') as Promise<AppSnapshot>,
   updateSettings: (update: SettingsUpdate) => ipcRenderer.invoke('app:update-settings', update) as Promise<AppSnapshot>,
-  checkNow: () => ipcRenderer.invoke('app:check-now') as Promise<AppSnapshot>,
+  checkNow: (sourceId) => ipcRenderer.invoke('app:check-now', sourceId) as Promise<AppSnapshot>,
   setPaused: (paused: boolean) => ipcRenderer.invoke('app:set-paused', paused) as Promise<AppSnapshot>,
   openXLogin: () => ipcRenderer.invoke('app:open-x-login') as Promise<AppSnapshot>,
   logoutX: () => ipcRenderer.invoke('app:logout-x') as Promise<AppSnapshot>,

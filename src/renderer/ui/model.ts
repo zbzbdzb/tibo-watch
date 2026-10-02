@@ -1,5 +1,6 @@
 import type { AppSnapshot, PostView, SettingsUpdate } from '../../shared/api';
 import type { SignalLevel } from '../../shared/domain';
+import { BEIJING_ZONE, localDateTime } from '../timeZones';
 export type PageId = 'overview' | 'inbox' | 'sources' | 'notifications' | 'settings';
 export type Filter = 'all' | Exclude<SignalLevel, 'irrelevant'>;
 export type Theme = 'light' | 'dark';
@@ -20,7 +21,7 @@ export function formatTime(value: string | null): string {
 export function formatDay(value: string | null): string {
   return value && Number.isFinite(Date.parse(value)) ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value)).replaceAll('/', '-') : '—';
 }
-export const fullDate = (value: string | null) => value ? `${formatDay(value)} ${formatTime(value)}` : '—';
+export const fullDate = (value: string | null, zone = BEIJING_ZONE) => value && Number.isFinite(Date.parse(value)) ? localDateTime(Date.parse(value), zone).replace('T', ' ') : '—';
 export function filteredPosts(posts: PostView[], filter: Filter, query = '') {
   const term = query.trim().toLowerCase();
   return posts.filter(item => (filter === 'all' || levelOf(item) === filter) && `${item.post.text} ${item.post.quotedText ?? ''}`.toLowerCase().includes(term));

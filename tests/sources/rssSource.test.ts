@@ -46,29 +46,86 @@ For instances working now, see [nitter-status](https://status.test).
 | [tor](https://tor.test) | ✅ | ✅ |`)).toEqual(['https://one.test']);
   });
 
-  it('tries the verified instance without first depending on registry availability', async () => {
+  it('collects from kareem without depending on a registry or the former default instance', async () => {
     const fetcher = vi.fn(async () => new Response(RSS));
     const source = new PublicRssSource({ fetcher });
-    expect((await source.check(context())).state).toBe('online');
+    const result = await source.check(context());
+    expect(result.state).toBe('online');
+    expect(result.posts).toHaveLength(2);
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(fetcher).toHaveBeenCalledWith('https://nitter.perennialte.ch/thsottiaux/with_replies/rss', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('https://nitter.kareem.one/thsottiaux/with_replies/rss', expect.objectContaining({
       credentials: 'omit', cache: 'no-store', redirect: 'manual',
     }));
   });
 
-  it('discovers a replacement and prioritizes the last working instance on the next check', async () => {
+  it('fails over to meowing and prioritizes the last successful feed on the next check', async () => {
     const fetcher = vi.fn(async (url: string) => {
-      if (url.includes('Instances.md')) return new Response('## Public\n| [two](https://two.test) | ✅ | ✅ |');
-      return url.startsWith('https://two.test') ? new Response(RSS) : new Response('unavailable', { status: 503 });
+      return url === 'https://nitter.meowing.monster/thsottiaux/with_replies/rss'
+        ? new Response(RSS) : new Response('unavailable', { status: 503 });
     });
     const source = new PublicRssSource({ fetcher });
-    expect((await source.check(context())).state).toBe('online');
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    const result = await source.check(context());
+    expect(result.state).toBe('online');
+    expect(result.posts).toHaveLength(2);
+    expect(source.lastWorkingInstance).toBe('https://nitter.meowing.monster');
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      'https://nitter.kareem.one/thsottiaux/with_replies/rss',
+      'https://nitter.meowing.monster/thsottiaux/with_replies/rss',
+    ]);
     fetcher.mockClear();
     expect((await source.check(context())).state).toBe('online');
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(fetcher.mock.calls[0]?.[0]).toBe('https://two.test/thsottiaux/with_replies/rss');
+    expect(fetcher.mock.calls[0]?.[0]).toBe('https://nitter.meowing.monster/thsottiaux/with_replies/rss');
   });
+
+  it('reports both selected feeds unavailable without silently using old or discovered hosts', async () => {
+    const fetcher = vi.fn(async (url: string) => {
+      const selected = url === 'https://nitter.kareem.one/thsottiaux/with_replies/rss' ||
+        url === 'https://nitter.meowing.monster/thsottiaux/with_replies/rss';
+      return new Response(selected ? '<html>RSS is disabled</html>' : RSS);
+    });
+    const source = new PublicRssSource({ fetcher });
+    const result = await source.check(context());
+    expect(result).toMatchObject({ state: 'error', posts: [], errorCode: 'RSS_INSTANCES_UNAVAILABLE' });
+    expect(source.lastWorkingInstance).toBeNull();
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      'https://nitter.kareem.one/thsottiaux/with_replies/rss',
+      'https://nitter.meowing.monster/thsottiaux/with_replies/rss',
+    ]);
+  });
+
+  it('returns to kareem when the remembered meowing feed becomes unavailable', async () => {
+    let available = 'https://nitter.meowing.monster/thsottiaux/with_replies/rss';
+    const fetcher = vi.fn(async (url: string) =>
+      new Response(url === available ? RSS : 'unavailable', { status: url === available ? 200 : 503 }));
+    const source = new PublicRssSource({ fetcher });
+    expect((await source.check(context())).state).toBe('online');
+    available = 'https://nitter.kareem.one/thsottiaux/with_replies/rss';
+    fetcher.mockClear();
+    expect((await source.check(context())).posts).toHaveLength(2);
+    expect(source.lastWorkingInstance).toBe('https://nitter.kareem.one');
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      'https://nitter.meowing.monster/thsottiaux/with_replies/rss',
+      'https://nitter.kareem.one/thsottiaux/with_replies/rss',
+    ]);
+  });
+
+  it('allows a healthy public feed that needs more than five seconds to respond', async () => {
+    const fetcher = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (!String(url).includes('kareem.one') && !String(url).includes('perennialte.ch')) {
+        return new Response('unavailable', { status: 503 });
+      }
+      return new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(new Response(RSS)), 6_000);
+        init?.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(init.signal?.reason);
+        }, { once: true });
+      });
+    }) as typeof fetch;
+    const source = new PublicRssSource({ fetcher });
+    expect((await source.check(context())).posts).toHaveLength(2);
+  }, 10_000);
 
   it('rejects challenge HTML and malformed XML even when HTTP returns 200', async () => {
     expect(parseNitterRss('<html><body>Verify you are human</body></html>', 'public-rss')).toEqual([]);
@@ -85,7 +142,7 @@ For instances working now, see [nitter-status](https://status.test).
       if (url.includes('Instances.md') && registryAvailable) return new Response('## Public\n| [new](https://new.test) | ✅ | ✅ |');
       return url.startsWith('https://new.test') ? new Response(RSS) : new Response('unavailable', { status: 503 });
     });
-    const source = new PublicRssSource({ fetcher });
+    const source = new PublicRssSource({ fetcher, preferredInstances: [], registryUrl: 'https://registry.test/Instances.md' });
     expect((await source.check(context())).state).toBe('error');
     registryAvailable = true;
     expect((await source.check(context())).state).toBe('online');
@@ -100,6 +157,20 @@ For instances working now, see [nitter-status](https://status.test).
     fetcher.mockClear();
     await expect(source.check({ ...context(), signal: AbortSignal.abort() })).rejects.toThrow();
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('cancels a pending feed without waiting for its timeout or trying another mirror', async () => {
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      }));
+    const source = new PublicRssSource({ fetcher });
+    const controller = new AbortController();
+    const pending = source.check({ ...context(), signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(source.lastWorkingInstance).toBeNull();
   });
 
   it('parses originals and replies, normalizes canonical links, and ignores reposts', () => {
@@ -161,7 +232,7 @@ For instances working now, see [nitter-status](https://status.test).
       if (url.startsWith('https://one.test')) return new Response('bad gateway', { status: 502 });
       return new Response(RSS, { status: 200 });
     });
-    const source = new PublicRssSource({ fetcher, preferredInstances: [] });
+    const source = new PublicRssSource({ fetcher, preferredInstances: [], registryUrl: 'https://registry.test/Instances.md' });
 
     const result = await source.check({
       checkedAt: '2026-07-31T05:00:00.000Z',
@@ -187,7 +258,7 @@ For instances working now, see [nitter-status](https://status.test).
       }
       return new Response(RSS, { status: 200 });
     }) as typeof fetch;
-    const source = new PublicRssSource({ fetcher, requestTimeoutMs: 5, preferredInstances: [] });
+    const source = new PublicRssSource({ fetcher, requestTimeoutMs: 5, preferredInstances: [], registryUrl: 'https://registry.test/Instances.md' });
 
     const result = await source.check({
       checkedAt: '2026-07-31T05:00:00.000Z',

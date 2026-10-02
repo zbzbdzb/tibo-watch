@@ -40,11 +40,18 @@ test('settings scrolling and time-zone converter work in both themes and desktop
     await category('外观');
     await expect(page.getByText('一种清晰的秩序，两种舒适的光线。')).toHaveCount(0);
     await category('时区换算');
-    await page.getByLabel('来源日期', { exact: true }).fill('2026-09-12');
-    await page.getByLabel('来源时间', { exact: true }).fill('14:00');
+    const source = page.getByLabel('来源时区', { exact: true });
+    await expect(source).toHaveValue('Etc/GMT+8');
+    await page.getByLabel('来源日期', { exact: true }).fill('2026-10-02');
+    await page.getByLabel('来源时间', { exact: true }).fill('10:00');
     const result = page.getByLabel('换算结果', { exact: true });
-    await expect(result).toContainText('2026-09-13 05:00');
-    await expect(result).toContainText('PDT'); await expect(result).toContainText('次日');
+    await expect(result).toContainText('2026-10-03 02:00');
+    await expect(result).toContainText('PST'); await expect(result).toContainText('次日');
+    await source.selectOption('America/Los_Angeles');
+    await expect(result).toContainText('2026-10-03 01:00');
+    await expect(result).toContainText('PDT');
+    await source.selectOption('Etc/GMT+8');
+    await expect(result).toContainText('2026-10-03 02:00');
     const output = process.env.TIBO_WATCH_SCREENSHOT_DIR ?? tmpdir();
     const scroll = page.getByRole('region', { name: '设置内容' });
     for (const theme of ['dark', 'light']) {
@@ -72,20 +79,42 @@ test('settings scrolling and time-zone converter work in both themes and desktop
       await page.setViewportSize({ width: 1536, height: 1024 });
     }
     await page.getByRole('button', { name: '交换来源与目标时区' }).click();
-    await expect(result).toContainText('2026-09-12 14:00'); await expect(result).toContainText('前一日');
+    await expect(result).toContainText('2026-10-02 10:00'); await expect(result).toContainText('前一日');
     await page.getByRole('button', { name: '交换来源与目标时区' }).click();
+    await source.selectOption('America/Los_Angeles');
     await page.getByLabel('来源日期', { exact: true }).fill('2026-11-01');
     await page.getByLabel('来源时间', { exact: true }).fill('01:30');
     await expect(result).toContainText('选择具体时刻');
+    await page.getByLabel('重复时间的具体时刻').selectOption('0');
+    await expect(result).toContainText('2026-11-01 16:30');
     await page.getByLabel('重复时间的具体时刻').selectOption('1');
     await expect(result).toContainText('2026-11-01 17:30');
     await page.getByLabel('来源日期', { exact: true }).fill('2026-03-08');
     await page.getByLabel('来源时间', { exact: true }).fill('02:30');
     await expect(page.getByRole('alert')).toContainText('不存在');
     await expect(page.getByRole('button', { name: '交换来源与目标时区' })).toBeDisabled();
+    await source.selectOption('Etc/GMT+8');
+    await expect(result).toContainText('2026-03-08 18:30');
+    await expect(result).toContainText('PST');
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await source.selectOption('America/Los_Angeles');
     await page.getByRole('button', { name: '使用当前时间' }).click();
     await expect(page.getByRole('alert')).toHaveCount(0);
     await expect(page.getByRole('button', { name: '交换来源与目标时区' })).toBeEnabled();
+    await nav('动态收件箱');
+    const postTimes = page.locator('.author-line time');
+    await expect(postTimes).toHaveCount(2);
+    await expect(postTimes.nth(0)).toHaveText('2025-05-08 14:28 北京时间');
+    await expect(postTimes.nth(1)).toContainText('2025-05-07 22:28');
+    await expect(postTimes.nth(1)).toContainText('PST');
+    await expect(postTimes.nth(1)).toContainText(/UTC[−-]0?8/);
+    for (const size of [{ width: 1536, height: 1024 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(size);
+      await expect(postTimes.nth(0)).toBeVisible(); await expect(postTimes.nth(1)).toBeVisible();
+      expect(await page.locator('.reader-scroll').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: join(output, `post-dual-time-browser-${size.width}.png`), scale: 'css' });
+    }
     expect(errors).toEqual([]); await expect(page.locator('vite-error-overlay')).toHaveCount(0);
   } finally {
     await browser.close();
